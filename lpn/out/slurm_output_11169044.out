@@ -1,0 +1,157 @@
+============================================================================================== 
+Warning! Mixing Conda and module environments may lead to corruption of the
+user environment. 
+We do not recommend users mixing those two environments unless absolutely
+necessary. Note that 
+SURF does not provide any support for Conda environment.
+For more information, please refer to our software policy page:
+https://servicedesk.surf.nl/wiki/display/WIKI/Software+policy+Snellius#SoftwarepolicySnellius-UseofAnacondaandMinicondaenvironmentsonSnellius 
+
+Remember that many packages have already been installed on the system and can
+be loaded using 
+the 'module load <package__name>' command. If you are uncertain if a package is
+already available 
+on the system, please use 'module avail' or 'module spider' to search for it.
+============================================================================================== 
+/var/spool/slurm/slurmd/job11169044/slurm_script: line 18: export: `=': not a valid identifier
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+[2025-04-14 15:31:03,411][jax._src.xla_bridge][INFO] - Unable to initialize backend 'rocm': module 'jaxlib.xla_extension' has no attribute 'GpuAllocatorConfig'
+[2025-04-14 15:31:03,415][jax._src.xla_bridge][INFO] - Unable to initialize backend 'tpu': INTERNAL: Failed to open libtpu.so: libtpu.so: cannot open shared object file: No such file or directory
+[2025-04-14 15:31:03,430][root][INFO] - All devices available: [cuda(id=0)]
+wandb: Currently logged in as: alisia-baielli. Use `wandb login --relogin` to force relogin
+wandb: wandb version 0.19.9 is available!  To upgrade, please run:
+wandb:  $ pip install wandb --upgrade
+wandb: Tracking run with wandb version 0.17.3
+wandb: Run data is saved locally in /gpfs/home5/scur2570/lpn/wandb/run-20250414_153110-f41qt9mh
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run stilted-snowball-3
+wandb: ⭐️ View project at https://wandb.ai/alisia-baielli/ARC
+wandb: 🚀 View run at https://wandb.ai/alisia-baielli/ARC/runs/f41qt9mh
+[2025-04-14 15:31:11,452][root][INFO] - Number of devices: 1
+[2025-04-14 15:31:11,453][root][INFO] - Using a task generator for training.
+2025-04-14 15:31:11.567377: W external/xla/xla/service/gpu/nvptx_compiler.cc:765] The NVIDIA driver's CUDA version is 12.7 which is older than the ptxas CUDA version (12.8.93). Because the driver is older than the ptxas version, XLA is disabling parallel compilation, which may slow down compilation. You should update your NVIDIA driver or use the NVIDIA-provided CUDA forward compatibility packages.
+Generating dataset:   0% 0/64 [00:00<?, ?it/s]/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+Generating dataset:   2% 1/64 [00:07<07:47,  7.42s/it]Generating dataset:   9% 6/64 [00:07<00:54,  1.07it/s]Generating dataset:  22% 14/64 [00:07<00:16,  3.12it/s]Generating dataset:  78% 50/64 [00:07<00:00, 15.90it/s]Generating dataset: 100% 64/64 [00:07<00:00,  8.12it/s]
+Generating dataset:   0% 0/64 [00:00<?, ?it/s]/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+Generating dataset:   2% 1/64 [00:05<05:46,  5.50s/it]Generating dataset:   5% 3/64 [00:05<01:29,  1.47s/it]Generating dataset:  67% 43/64 [00:05<00:01, 14.09it/s]Generating dataset:  98% 63/64 [00:05<00:00, 22.46it/s]Generating dataset: 100% 64/64 [00:05<00:00, 10.79it/s]
+[2025-04-14 15:31:41,600][root][INFO] - Starting training...
+  0% 0/50000 [00:00<?, ?it/s][2025-04-14 15:31:41,600][root][INFO] - Number of total parameters: 2,493,248
+[2025-04-14 15:31:41,600][root][INFO] - Number of encoder parameters: 65,856
+[2025-04-14 15:31:41,601][root][INFO] - Number of decoder parameters: 2,427,392
+[2025-04-14 15:31:41,601][root][INFO] - Running on devices: [cuda(id=0)].
+[2025-04-14 15:31:41,601][root][INFO] - Total number of gradient steps: 50,000.
+[2025-04-14 15:31:41,601][root][INFO] - Total number of logs: 500.
+[2025-04-14 15:31:41,601][root][INFO] - Logging every 100 gradient steps.
+[2025-04-14 15:31:41,601][root][INFO] - Total number of evaluations: 10.
+[2025-04-14 15:31:41,601][root][INFO] - Evaluating every 5,000 gradient steps.
+[2025-04-14 15:31:41,601][root][INFO] - Not saving checkpoints during training.
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+2025-04-14 15:33:51.430955: W external/xla/xla/service/hlo_rematerialization.cc:3005] Can't reduce memory use below 27.99GiB (30052843042 bytes) by rematerialization; only reduced to 123.77GiB (132902542649 bytes), down from 200.50GiB (215290384513 bytes) originally
+2025-04-14 15:34:12.746369: W external/xla/xla/tsl/framework/bfc_allocator.cc:482] Allocator (GPU_0_bfc) ran out of memory trying to allocate 123.74GiB (rounded to 132864019456)requested by op 
+2025-04-14 15:34:12.746887: W external/xla/xla/tsl/framework/bfc_allocator.cc:494] *___________________________________________________________________________________________________
+E0414 15:34:12.746996 3426342 pjrt_stream_executor_client.cc:2985] Execution of replica 0 failed: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 132864019408 bytes.
+Error executing job with overrides: []
+jax.errors.SimplifiedTraceback: For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/gpfs/home5/scur2570/lpn/src/train.py", line 835, in run
+    final_state = trainer.train(
+  File "/gpfs/home5/scur2570/lpn/src/train.py", line 746, in train
+    state = self.train_epoch(
+  File "/gpfs/home5/scur2570/lpn/src/train.py", line 626, in train_epoch
+    state, metrics = self.train_n_steps(state, batches, train_key)
+  File "/gpfs/home5/scur2570/lpn/src/train.py", line 362, in train_n_steps
+    state, metrics = self.pmap_train_steps(state, batches, keys)
+jaxlib.xla_extension.XlaRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 132864019408 bytes.
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.
+wandb: - 0.058 MB of 0.058 MB uploadedwandb: \ 0.058 MB of 0.058 MB uploadedwandb: | 0.058 MB of 0.058 MB uploadedwandb: / 0.084 MB of 0.100 MB uploaded (0.003 MB deduped)wandb: 
+wandb: Run history:
+wandb: timing/dataloading_time ▁
+wandb: 
+wandb: Run summary:
+wandb: timing/dataloading_time 62.98033
+wandb: 
+wandb: 🚀 View run stilted-snowball-3 at: https://wandb.ai/alisia-baielli/ARC/runs/f41qt9mh
+wandb: ⭐️ View project at: https://wandb.ai/alisia-baielli/ARC
+wandb: Synced 6 W&B file(s), 0 media file(s), 3 artifact file(s) and 1 other file(s)
+wandb: Find logs at: ./wandb/run-20250414_153110-f41qt9mh/logs
+wandb: WARNING The new W&B backend becomes opt-out in version 0.18.0; try it out with `wandb.require("core")`! See https://wandb.me/wandb-core for more information.
+
+JOB STATISTICS
+==============
+Job ID: 11169044
+Cluster: snellius
+User/Group: scur2570/scur2570
+State: FAILED (exit code 1)
+Nodes: 1
+Cores per node: 18
+CPU Utilized: 00:32:14
+CPU Efficiency: 33.68% of 01:35:42 core-walltime
+Job Wall-clock time: 00:05:19
+Memory Utilized: 42.10 GB
+Memory Efficiency: 35.09% of 120.00 GB (120.00 GB/node)

@@ -1,0 +1,336 @@
+diff --git a/requirements.txt b/requirements.txt
+index 93f4711..97fc003 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -8,8 +8,9 @@ tqdm==4.66.4
+ optax==0.2.2
+ hydra-core==1.3.2
+ omegaconf==2.3.0
+-scikit-learn==1.5.1
++scikit-learn==1.4.2
+ seaborn==0.13.2
+ huggingface_hub==0.24.6
+-networkx==3.3
+-torch==2.4.1
++networkx==3.2.1
++torch==2.2.2
++
+diff --git a/src/configs/arc_train.yaml b/src/configs/arc_train.yaml
+index bf32c16..2d27703 100644
+--- a/src/configs/arc_train.yaml
++++ b/src/configs/arc_train.yaml
+@@ -20,7 +20,7 @@ training:
+   mixed_precision: True  # if True, it uses bfloat16 for activations (params stay in float32)
+   online_data_augmentation: True
+   task_generator:
+-    num_workers: 64
++    num_workers: 16
+     num_pairs: 4
+     class: ARC
+   train_datasets:
+diff --git a/src/configs/arc_train_scaling/5.yaml b/src/configs/arc_train_scaling/5.yaml
+index 9c4424a..0ae5a89 100644
+--- a/src/configs/arc_train_scaling/5.yaml
++++ b/src/configs/arc_train_scaling/5.yaml
+@@ -16,7 +16,7 @@ training:
+   mixed_precision: False  # if True, it uses bfloat16 for activations (params stay in float32)
+   online_data_augmentation: True
+   task_generator:
+-    num_workers: 64
++    num_workers: 16
+     num_pairs: 4
+     class: ARC
+     only_n_tasks: 5
+diff --git a/src/datasets/task_gen/dataloader.py b/src/datasets/task_gen/dataloader.py
+index 1c36b41..fba4631 100644
+--- a/src/datasets/task_gen/dataloader.py
++++ b/src/datasets/task_gen/dataloader.py
+@@ -17,7 +17,7 @@ class JAXDataLoader:
+ 
+     def __init__(
+         self,
+-        task_generator: PatternTaskGenerator | ArcTrainTaskGenerator,
++        task_generator,
+         batch_size: int,
+         log_every_n_steps: int,
+         num_workers: int,
+@@ -51,7 +51,7 @@ class JAXDataLoader:
+         self.key = jax.random.PRNGKey(seed or 0)
+         self.return_info = return_info
+ 
+-    def __iter__(self) -> Iterator[Tuple[chex.Array, chex.Array] | Tuple[chex.Array, chex.Array, dict]]:
++    def __iter__(self):
+         for batch in self.numpy_dataloader:
+             if self.return_info:
+                 *batch, info = batch
+@@ -66,14 +66,14 @@ class JAXDataLoader:
+ 
+ 
+ def collate_fn(
+-    batch: list[tuple[list[dict[str, tuple]], dict[str, Any]]],
+-    batch_size: int,
+-    log_every_n_steps: int,
+-    num_devices: Optional[int] = None,
++    batch,
++    batch_size,
++    log_every_n_steps,
++    num_devices = None,
+     return_info: bool = False,
+     max_rows: int = 30,
+     max_cols: int = 30,
+-) -> tuple[chex.Array, chex.Array] | tuple[chex.Array, chex.Array, dict]:
++):
+     tasks, infos = zip(*batch)
+     grids, shapes = [], []
+     for task in tasks:
+@@ -168,7 +168,7 @@ def make_dataset(
+     online_data_augmentation: bool = True,
+     seed: int = 0,
+     **task_generator_kwargs,
+-) -> tuple[chex.Array, chex.Array, chex.Array]:
++):
+     dataloader = make_task_gen_dataloader(
+         batch_size=1,
+         log_every_n_steps=1,
+diff --git a/src/datasets/task_gen/utils.py b/src/datasets/task_gen/utils.py
+index 88abd74..aec813b 100644
+--- a/src/datasets/task_gen/utils.py
++++ b/src/datasets/task_gen/utils.py
+@@ -1,14 +1,14 @@
+ import functools
+ import random
+ import signal
+-from typing import Any, Optional, Tuple, Callable, TypeVar, TypeAlias
++from typing import Any, Optional, Tuple, Callable, TypeVar
+ 
+ import matplotlib.pyplot as plt
+ 
+ from src.visualization import arc_cmap, arc_norm
+ 
+ 
+-def plot_task(task: list[dict] | dict, title: str = None, figsize_factor: float = 3) -> None:
++def plot_task(task, title: str = None, figsize_factor: float = 3) -> None:
+     height = 2
+     if isinstance(task, dict):
+         task = [task]
+@@ -61,17 +61,16 @@ def is_grid(grid: Any) -> bool:
+ 
+ 
+ T = TypeVar("T")
+-OptionalRandomState: TypeAlias = Optional[Tuple]
+ 
+ 
+ def run_with_timeout(
+     func: Callable[[], T], timeout: int
+-) -> Callable[[OptionalRandomState], Tuple[Optional[T], OptionalRandomState, Optional[Exception]]]:
++):
+     def timeout_handler(signum, frame):
+         raise TimeoutError(f"Function execution timed out after {timeout} seconds")
+ 
+     @functools.wraps(func)
+-    def wrapper(random_state: OptionalRandomState = None):
++    def wrapper(random_state):
+         result = None
+         exception = None
+ 
+diff --git a/src/models/lpn.py b/src/models/lpn.py
+index 5ec1ba8..b098f68 100644
+--- a/src/models/lpn.py
++++ b/src/models/lpn.py
+@@ -28,7 +28,7 @@ class LPN(nn.Module):
+         prior_kl_coeff: Optional[float] = None,
+         pairwise_kl_coeff: Optional[float] = None,
+         **mode_kwargs,
+-    ) -> tuple[chex.Array, dict[str, chex.Array]]:
++    ):
+         """
+         Forward pass of the LPN model.
+ 
+@@ -182,7 +182,7 @@ class LPN(nn.Module):
+     @staticmethod
+     def _sample_latents(
+         latents_mu: chex.Array, latents_logvar: chex.Array, key: chex.PRNGKey
+-    ) -> tuple[chex.Array, chex.Array, dict]:
++    ):
+         latents_std = jnp.exp(0.5 * latents_logvar)
+         latents = latents_mu + latents_std * jax.random.normal(key, latents_mu.shape)
+         kl_loss = jnp.mean(
+@@ -202,7 +202,7 @@ class LPN(nn.Module):
+         pairs: chex.Array,
+         grid_shapes: chex.Array,
+         dropout_eval: bool,
+-    ) -> tuple[chex.Array, dict]:
++    ):
+         """
+         Computes the loss for a single pair given a context.
+ 
+@@ -294,7 +294,7 @@ class LPN(nn.Module):
+         mode: Literal["mean", "first", "random_search", "gradient_ascent"],
+         return_two_best: bool = False,
+         **mode_kwargs,
+-    ) -> tuple[chex.Array, chex.Array, dict] | tuple[chex.Array, chex.Array, chex.Array, chex.Array, dict]:
++    ):
+         """
+         Predicts the output grid given an input grid and other (input, output) pairs and shapes that follow
+         the same transformation. Returns two predictions: the best prediction and the second best prediction.
+@@ -402,7 +402,7 @@ class LPN(nn.Module):
+ 
+     def _generate_output_from_context(
+         self, context: chex.Array, input: chex.Array, input_grid_shape: chex.Array, dropout_eval: bool
+-    ) -> tuple[chex.Array, chex.Array]:
++    ):
+         flattened_input = jnp.reshape(input, (*input.shape[:-2], -1))
+         input_seq = jnp.concatenate([input_grid_shape, flattened_input], axis=-1)
+         output_seq = jnp.zeros_like(input_seq).at[..., :2].set(1)  # Initialize the grid shape tokens to 1.
+@@ -424,7 +424,7 @@ class LPN(nn.Module):
+         output_shapes = output_seq[..., :2]
+         max_cols = self.decoder.config.max_cols
+ 
+-        def one_step(decoder: DecoderTransformer, output_seq: chex.Array, i: int) -> tuple[chex.Array, None]:
++        def one_step(decoder: DecoderTransformer, output_seq: chex.Array, i: int):
+             *_, grid_logits = decoder(input_seq, output_seq, context, dropout_eval)
+             # If we are at the beginning of a new row, the index of the logits to predict the next token is
+             # the index of the last non-padded token of the previous row.
+@@ -461,7 +461,7 @@ class LPN(nn.Module):
+         include_mean_latent: bool = True,
+         include_all_latents: bool = False,
+         **kwargs,
+-    ) -> tuple[chex.Array, chex.Array]:
++    ):
+         """Returns the best two contexts using a batched random search.
+ 
+         Args:
+@@ -569,7 +569,7 @@ class LPN(nn.Module):
+         random_perturbation: Optional[dict] = None,
+         stop_gradient_latent_move: bool = True,
+         **kwargs,
+-    ) -> tuple[chex.Array, chex.Array]:
++    ):
+         """Returns the best two contexts using a gradient ascent algorithm.
+ 
+         Args:
+@@ -812,7 +812,7 @@ class LPN(nn.Module):
+     @classmethod
+     def _flatten_input_output_for_decoding(
+         cls, pairs: chex.Array, grid_shapes: chex.Array
+-    ) -> tuple[chex.Array, chex.Array]:
++    ):
+         flattened_pairs = jnp.reshape(pairs, (*pairs.shape[:-3], -1, 2))
+         input_seq = jnp.concatenate([grid_shapes[..., 0], flattened_pairs[..., 0]], axis=-1)
+         output_seq = jnp.concatenate([grid_shapes[..., 1], flattened_pairs[..., 1]], axis=-1)
+@@ -821,7 +821,7 @@ class LPN(nn.Module):
+     @classmethod
+     def _select_best_and_second_best_latents(
+         cls, log_probs: chex.Array, latents: chex.Array
+-    ) -> tuple[chex.Array, chex.Array]:
++    ):
+         sorted_log_probs_indices = jnp.argsort(log_probs, axis=-1, descending=True)
+         best_context = jnp.take_along_axis(
+             latents, sorted_log_probs_indices[..., 0:1, None], axis=-2
+diff --git a/src/train.py b/src/train.py
+index 7d6ef34..7f107b6 100644
+--- a/src/train.py
++++ b/src/train.py
+@@ -20,6 +20,7 @@ import wandb
+ import hydra
+ import omegaconf
+ 
++
+ from src.models.lpn import LPN
+ from src.models.utils import DecoderTransformerConfig, EncoderTransformerConfig
+ from src.evaluator import Evaluator
+@@ -85,7 +86,7 @@ class Trainer:
+             devices=self.devices,
+         )
+ 
+-        def eval_one_step(batch: tuple[chex.Array, chex.Array, chex.PRNGKey], state: TrainState) -> dict:
++        def eval_one_step(batch, state: TrainState) -> dict:
+             pairs, grid_shapes, key = batch
+             random_search_key, perturbation_key, latents_key, latents_init_key = jax.random.split(key, 4)
+             _, metrics = state.apply_fn(
+@@ -122,7 +123,7 @@ class Trainer:
+                 shapes_inputs,
+                 shapes_outputs,
+                 keys,
+-            ) -> tuple[chex.Array, chex.Array, dict[str, chex.Array]]:
++            ):
+                 generated_grids_outputs, generated_shapes_outputs, generated_info_outputs = jax.lax.map(
+                     lambda args: self.model.apply(
+                         {"params": params},
+@@ -333,7 +334,7 @@ class Trainer:
+         return TrainState.create(apply_fn=self.model.apply, tx=optimizer, params=variables["params"])
+ 
+     def train_one_step(
+-        self, state: TrainState, batch: tuple[chex.Array, chex.Array], key: chex.PRNGKey
++        self, state: TrainState, batch, key: chex.PRNGKey
+     ) -> tuple[TrainState, dict]:
+         pairs, grid_shapes = batch
+         grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
+@@ -354,7 +355,7 @@ class Trainer:
+         return state, metrics
+ 
+     def train_n_steps(
+-        self, state: TrainState, batches: tuple[chex.Array, chex.Array], key: chex.PRNGKey
++        self, state: TrainState, batches, key: chex.PRNGKey
+     ) -> tuple[TrainState, dict]:
+         num_devices, num_steps = batches[0].shape[0:2]
+         keys = jax.random.split(key, (num_devices, num_steps))
+@@ -366,7 +367,7 @@ class Trainer:
+     @partial(jax.jit, static_argnames=("self", "log_every_n_steps"), backend="cpu")
+     def prepare_train_dataset_for_epoch(
+         self, key: chex.PRNGKey, log_every_n_steps: int
+-    ) -> tuple[chex.Array, chex.Array]:
++    ):
+         """Shuffle the dataset and reshape it to
+         (num_logs, log_every_n_steps, num_devices, batch_size_per_device, *).
+         """
+@@ -402,7 +403,7 @@ class Trainer:
+         dataset_shapes: chex.Array,
+         key: chex.PRNGKey,
+         batch_size: int,
+-    ) -> dict[str, chex.Array]:
++    ):
+         """
+         Evaluate the model on the given dataset. Computes the metrics similar to the training loss.
+ 
+@@ -448,11 +449,11 @@ class Trainer:
+         test_name: str,
+         dataset_grids: chex.Array,
+         dataset_shapes: chex.Array,
+-        program_ids: Optional[chex.Array],
++        program_ids,
+         batch_size: int,
+         key: chex.PRNGKey,
+         num_tasks_to_show: int = 5,
+-    ) -> tuple[dict[str, float], Optional[plt.Figure], plt.Figure, Optional[plt.Figure]]:
++    ):
+         """
+         Generate the output grids for each task in the dataset by leaving one (input, output) pair out.
+         Does this by masking each of the N (input, output) pairs for each task.
+@@ -567,7 +568,7 @@ class Trainer:
+         overfit_task: Optional[str] = None,
+         num_tasks_to_show: int = 5,
+         progress_bar: bool = False,
+-    ) -> tuple[dict[str, float], Optional[plt.Figure]]:
++    ):
+         with open(json_challenges_file, "r") as f:
+             challenges = json.load(f)
+         train = "training" in json_challenges_file
+@@ -794,7 +795,7 @@ class Trainer:
+ 
+ def instantiate_config_for_mpt(
+     transformer_cfg: omegaconf.DictConfig,
+-) -> DecoderTransformerConfig | EncoderTransformerConfig:
++):
+     """Override the TransformerLayer config to account for mixed-precision training (bfloat16 data type)."""
+     config = hydra.utils.instantiate(
+         transformer_cfg,
+@@ -816,7 +817,7 @@ def run(cfg: omegaconf.DictConfig):
+     lpn = LPN(encoder=encoder, decoder=decoder)
+ 
+     wandb.init(
+-        entity="TheThinker",
++        entity="alisia-baielli",
+         project="ARC",
+         settings=wandb.Settings(console="redirect"),
+         config=omegaconf.OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
