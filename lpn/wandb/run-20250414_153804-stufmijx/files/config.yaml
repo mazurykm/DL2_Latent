@@ -1,0 +1,120 @@
+wandb_version: 1
+
+training:
+  desc: null
+  value:
+    seed: 0
+    resume_from_checkpoint: null
+    inference_mode: mean
+    batch_size: 16
+    gradient_accumulation_steps: 4
+    total_num_steps: 1000
+    log_every_n_steps: 100
+    eval_every_n_logs: 50
+    save_checkpoint_every_n_logs: 100
+    learning_rate: 0.0004
+    prior_kl_coeff: 0.0001
+    pairwise_kl_coeff: null
+    mixed_precision: false
+    online_data_augmentation: true
+    task_generator:
+      num_workers: 16
+      num_pairs: 4
+      class: ARC
+      only_n_tasks: 5
+    train_datasets: null
+eval:
+  desc: null
+  value:
+    eval_datasets: null
+    test_datasets:
+    - generator: ARC
+      task_generator_kwargs: null
+      name: arc_train_all_mean
+      num_pairs: 4
+      length: 64
+      batch_size: 16
+      num_tasks_to_show: 32
+    - generator: ARC
+      task_generator_kwargs:
+        only_n_tasks: 5
+      name: arc_train_mean
+      num_pairs: 4
+      length: 64
+      batch_size: 16
+      num_tasks_to_show: 32
+    json_datasets:
+    - challenges: json/arc-agi_training_challenges.json
+      solutions: json/arc-agi_training_solutions.json
+      name: mean
+      only_n_tasks: 5
+      num_tasks_to_show: 5
+encoder_transformer:
+  desc: null
+  value:
+    _target_: src.models.utils.EncoderTransformerConfig
+    max_rows: 30
+    max_cols: 30
+    num_layers: 2
+    transformer_layer:
+      _target_: src.models.utils.TransformerLayerConfig
+      num_heads: 4
+      emb_dim_per_head: 16
+      mlp_dim_factor: 1.0
+      dropout_rate: 0.0
+      attention_dropout_rate: 0.0
+    latent_dim: 64
+    variational: true
+    latent_projection_bias: false
+decoder_transformer:
+  desc: null
+  value:
+    _target_: src.models.utils.DecoderTransformerConfig
+    max_rows: 30
+    max_cols: 30
+    num_layers: 6
+    transformer_layer:
+      _target_: src.models.utils.TransformerLayerConfig
+      num_heads: 8
+      emb_dim_per_head: 32
+      mlp_dim_factor: 1.0
+      dropout_rate: 0.0
+      attention_dropout_rate: 0.0
+_wandb:
+  desc: null
+  value:
+    code_path: code/src/train.py
+    python_version: 3.9.18
+    cli_version: 0.17.3
+    framework: torch
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1744637884
+    t:
+      1:
+      - 1
+      - 5
+      - 12
+      - 45
+      - 49
+      - 50
+      - 53
+      - 55
+      2:
+      - 1
+      - 5
+      - 12
+      - 45
+      - 49
+      - 50
+      - 53
+      - 55
+      3:
+      - 16
+      - 23
+      - 61
+      4: 3.9.18
+      5: 0.17.3
+      8:
+      - 5
+      13: linux-x86_64

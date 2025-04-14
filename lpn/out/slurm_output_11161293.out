@@ -1,0 +1,19 @@
+Traceback (most recent call last):
+  File "/gpfs/home5/scur2570/lpn/src/train.py", line 9, in <module>
+    import chex
+ModuleNotFoundError: No module named 'chex'
+
+JOB STATISTICS
+==============
+Job ID: 11161293
+Cluster: snellius
+User/Group: scur2570/scur2570
+State: RUNNING
+Nodes: 1
+Cores per node: 18
+CPU Utilized: 00:00:00
+CPU Efficiency: 0.00% of 00:04:12 core-walltime
+Job Wall-clock time: 00:00:14
+Memory Utilized: 0.00 MB
+Memory Efficiency: 0.00% of 120.00 GB (120.00 GB/node)
+WARNING: Efficiency statistics can only be obtained after the job has ended as seff tool is based on the accounting database data.
