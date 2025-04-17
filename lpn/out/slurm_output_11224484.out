@@ -1,0 +1,87 @@
+============================================================================================== 
+Warning! Mixing Conda and module environments may lead to corruption of the
+user environment. 
+We do not recommend users mixing those two environments unless absolutely
+necessary. Note that 
+SURF does not provide any support for Conda environment.
+For more information, please refer to our software policy page:
+https://servicedesk.surf.nl/wiki/display/WIKI/Software+policy+Snellius#SoftwarepolicySnellius-UseofAnacondaandMinicondaenvironmentsonSnellius 
+
+Remember that many packages have already been installed on the system and can
+be loaded using 
+the 'module load <package__name>' command. If you are uncertain if a package is
+already available 
+on the system, please use 'module avail' or 'module spider' to search for it.
+============================================================================================== 
+/var/spool/slurm/slurmd/job11224484/slurm_script: line 18: export: `=': not a valid identifier
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+wandb: Currently logged in as: alisia-baielli. Use `wandb login --relogin` to force relogin
+wandb: wandb version 0.19.9 is available!  To upgrade, please run:
+wandb:  $ pip install wandb --upgrade
+wandb: Tracking run with wandb version 0.17.3
+wandb: Run data is saved locally in /gpfs/home5/scur2570/lpn/wandb/run-20250416_193220-n8uvlqiq
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run clear-disco-1
+wandb: ⭐️ View project at https://wandb.ai/alisia-baielli/lpn-src
+wandb: 🚀 View run at https://wandb.ai/alisia-baielli/lpn-src/runs/n8uvlqiq
+Downloading the model artifact...
+wandb: ERROR artifacts must be specified as 'collection:alias' (Error 400: Bad Request)
+Traceback (most recent call last):
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/apis/normalize.py", line 41, in wrapper
+    return func(*args, **kwargs)
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/apis/public/api.py", line 1034, in artifact
+    artifact = wandb.Artifact._from_name(
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/sdk/artifacts/artifact.py", line 258, in _from_name
+    response = client.execute(
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/sdk/lib/retry.py", line 212, in wrapped_fn
+    return retrier(*args, **kargs)
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/sdk/lib/retry.py", line 131, in __call__
+    result = self._call_fn(*args, **kwargs)
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/apis/public/api.py", line 70, in execute
+    return self._client.execute(*args, **kwargs)
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/vendor/gql-0.2.0/wandb_gql/client.py", line 52, in execute
+    result = self._get_result(document, *args, **kwargs)
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/vendor/gql-0.2.0/wandb_gql/client.py", line 60, in _get_result
+    return self.transport.execute(document, *args, **kwargs)
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/sdk/lib/gql_request.py", line 59, in execute
+    request.raise_for_status()
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/requests/models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 400 Client Error: Bad Request for url: https://api.wandb.ai/graphql
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/gpfs/home5/scur2570/lpn/src/evaluate_checkpoint.py", line 755, in <module>
+    main(
+  File "/gpfs/home5/scur2570/lpn/src/evaluate_checkpoint.py", line 456, in main
+    artifact = run.use_artifact(artifact_path, type="model")
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/sdk/wandb_run.py", line 400, in wrapper_fn
+    return func(self, *args, **kwargs)
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/sdk/wandb_run.py", line 390, in wrapper
+    return func(self, *args, **kwargs)
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/sdk/wandb_run.py", line 2938, in use_artifact
+    artifact = public_api.artifact(type=type, name=name)
+  File "/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/wandb/apis/normalize.py", line 51, in wrapper
+    raise CommError(message, error)
+wandb.errors.CommError: artifacts must be specified as 'collection:alias' (Error 400: Bad Request)
+wandb: - 0.047 MB of 0.047 MB uploadedwandb: \ 0.047 MB of 0.047 MB uploadedwandb: | 0.047 MB of 0.047 MB uploadedwandb: / 0.047 MB of 0.047 MB uploadedwandb: - 0.064 MB of 0.070 MB uploadedwandb: 🚀 View run clear-disco-1 at: https://wandb.ai/alisia-baielli/lpn-src/runs/n8uvlqiq
+wandb: ⭐️ View project at: https://wandb.ai/alisia-baielli/lpn-src
+wandb: Synced 6 W&B file(s), 0 media file(s), 3 artifact file(s) and 1 other file(s)
+wandb: Find logs at: ./wandb/run-20250416_193220-n8uvlqiq/logs
+wandb: WARNING The new W&B backend becomes opt-out in version 0.18.0; try it out with `wandb.require("core")`! See https://wandb.me/wandb-core for more information.
+
+JOB STATISTICS
+==============
+Job ID: 11224484
+Cluster: snellius
+User/Group: scur2570/scur2570
+State: FAILED (exit code 1)
+Nodes: 1
+Cores per node: 18
+CPU Utilized: 00:00:12
+CPU Efficiency: 2.67% of 00:07:30 core-walltime
+Job Wall-clock time: 00:00:25
+Memory Utilized: 1.56 MB
+Memory Efficiency: 0.00% of 120.00 GB (120.00 GB/node)

@@ -1,0 +1,58 @@
+============================================================================================== 
+Warning! Mixing Conda and module environments may lead to corruption of the
+user environment. 
+We do not recommend users mixing those two environments unless absolutely
+necessary. Note that 
+SURF does not provide any support for Conda environment.
+For more information, please refer to our software policy page:
+https://servicedesk.surf.nl/wiki/display/WIKI/Software+policy+Snellius#SoftwarepolicySnellius-UseofAnacondaandMinicondaenvironmentsonSnellius 
+
+Remember that many packages have already been installed on the system and can
+be loaded using 
+the 'module load <package__name>' command. If you are uncertain if a package is
+already available 
+on the system, please use 'module avail' or 'module spider' to search for it.
+============================================================================================== 
+/var/spool/slurm/slurmd/job11224415/slurm_script: line 18: export: `=': not a valid identifier
+/gpfs/home5/scur2570/lpn-env/lib64/python3.9/site-packages/networkx/utils/backends.py:135: RuntimeWarning: networkx backend defined more than once: nx-loopback
+  backends.update(_get_backends("networkx.backends"))
+usage: evaluate_checkpoint.py [-h] -w WANDB_ARTIFACT_PATH
+                              [-jc JSON_CHALLENGES_FILE]
+                              [-js JSON_SOLUTIONS_FILE]
+                              [--only-n-tasks ONLY_N_TASKS]
+                              [-d DATASET_FOLDER]
+                              [--dataset-length DATASET_LENGTH]
+                              [--dataset-batch-size DATASET_BATCH_SIZE]
+                              [--dataset-use-hf DATASET_USE_HF]
+                              [--dataset-seed DATASET_SEED]
+                              [-i INFERENCE_MODE]
+                              [--random-search-seed RANDOM_SEARCH_SEED]
+                              [--num-samples NUM_SAMPLES] [--scale SCALE]
+                              [--scan-batch-size SCAN_BATCH_SIZE]
+                              [--num-steps NUM_STEPS] [--lr LR]
+                              [--lr-schedule LR_SCHEDULE]
+                              [--lr-schedule-exponent LR_SCHEDULE_EXPONENT]
+                              [--optimizer OPTIMIZER]
+                              [--optimizer-kwargs OPTIMIZER_KWARGS]
+                              [--accumulate-gradients-decoder-pairs ACCUMULATE_GRADIENTS_DECODER_PAIRS]
+                              [--scan-gradients-latents SCAN_GRADIENTS_LATENTS]
+                              [--include-mean-latent INCLUDE_MEAN_LATENT]
+                              [--include-all-latents INCLUDE_ALL_LATENTS]
+                              [--random-perturbation RANDOM_PERTURBATION]
+                              [--mixed-precision MIXED_PRECISION]
+evaluate_checkpoint.py: error: unrecognized arguments: --config-path configs/arc_train_scaling --config-name 5
+
+JOB STATISTICS
+==============
+Job ID: 11224415
+Cluster: snellius
+User/Group: scur2570/scur2570
+State: RUNNING
+Nodes: 1
+Cores per node: 18
+CPU Utilized: 00:00:00
+CPU Efficiency: 0.00% of 00:04:12 core-walltime
+Job Wall-clock time: 00:00:14
+Memory Utilized: 0.00 MB
+Memory Efficiency: 0.00% of 120.00 GB (120.00 GB/node)
+WARNING: Efficiency statistics can only be obtained after the job has ended as seff tool is based on the accounting database data.
