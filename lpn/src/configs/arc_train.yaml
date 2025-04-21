@@ -1,7 +1,7 @@
 training:
   seed: 0
   resume_from_checkpoint: null  # null to start from scratch
-  inference_mode: mean  # mean, all, random_search, gradient_ascent
+  inference_mode: matrix
   inference_kwargs:
     num_steps: 1
     lr: 0.1
@@ -113,7 +113,7 @@ encoder_transformer:
     mlp_dim_factor: 4.0
     dropout_rate: 0.0
     attention_dropout_rate: 0.0
-  latent_dim: 128
+  latent_dim: 256
   variational: True
   latent_projection_bias: False
 
