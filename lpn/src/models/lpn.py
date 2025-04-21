@@ -108,8 +108,8 @@ class LPN(nn.Module):
             # Reshape back to vector
             context = context.reshape(*context.shape[:-2], -1)
             
-            # Compute loss
-            loss = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            # Compute loss and metrics
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "all":
             # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
             loss, metrics = jax.vmap(
