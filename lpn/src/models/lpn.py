@@ -1127,8 +1127,9 @@ class LPN(nn.Module):
         for i in range(2, latents_reshaped.shape[-3]):
             context = jnp.matmul(context, latents_reshaped[..., i, :, :])
         
+        context_2d = context.reshape(-1, latent_dim)
         # Reshape back to vector using the original latent dimension
-        return context.reshape(*batch_shape, latent_dim)
+        return context_2d.reshape(*batch_shape, latent_dim)
 
 
 if __name__ == "__main__":
