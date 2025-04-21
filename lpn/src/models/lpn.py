@@ -24,7 +24,7 @@ class LPN(nn.Module):
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
-        mode: Literal["mean", "all", "random_search", "gradient_ascent"],
+        mode: Literal["mean", "all", "random_search", "gradient_ascent", "ant_colony", "sum", "matrix"],
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
         **mode_kwargs,
@@ -42,7 +42,7 @@ class LPN(nn.Module):
                 represents (rows, columns) of two channels, e.g. [[R_input, R_output], [C_input, C_output]].
                 Expects grid shapes values to be in [1, max_rows] and [1, max_cols].
             dropout_eval: if false dropout is applied otherwise it is not.
-            mode: mode of the forward pass. Can be "mean" or "all".
+            mode: mode of the forward pass. Can be "mean", "all", "random_search", "gradient_ascent", "ant_colony", "sum", or "matrix".
                 - "mean": decodes the output using the mean latent of all the other pairs.
                 - "all": decodes the output N-1 times, each time using a different latent from the other
                     pairs.
@@ -50,6 +50,9 @@ class LPN(nn.Module):
                     and then decodes the output using that latent.
                 - "gradient_ascent": uses gradient ascent to find the latent that best explains the
                     (input, output) pairs and then decodes the output using that latent
+                - "ant_colony": uses Ant Colony Optimization to find the best latent for each pair.
+                - "sum": sums up the latent vectors instead of averaging them.
+                - "matrix": treats latent vectors as matrices and uses matrix multiplication for composition.
             prior_kl_coeff: KL divergence coefficient for the variational inference. Required when using
                 variational inference.
             pairwise_kl_coeff: KL divergence coefficient for the pairwise KL divergence. Optional.
@@ -79,6 +82,31 @@ class LPN(nn.Module):
             # Compute the context vector by taking the mean of all but one latents.
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+        elif mode == "sum":
+            # Compute the context vector by summing all but one latents.
+            context = leave_one_out_latents.sum(axis=-2)  # (*B, N, H)
+            # Compute the loss for each pair using the sum of all but one latents. Shape (*B, N).
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+        elif mode == "matrix":
+            # Reshape latents into matrices (assuming latent_dim is a perfect square)
+            latent_dim = leave_one_out_latents.shape[-1]
+            matrix_size = int(jnp.sqrt(latent_dim))
+            assert matrix_size * matrix_size == latent_dim, f"Latent dimension {latent_dim} must be a perfect square for matrix mode"
+            
+            # Reshape latents into matrices of shape (*B, N, N-1, matrix_size, matrix_size)
+            matrix_latents = leave_one_out_latents.reshape(*leave_one_out_latents.shape[:-1], matrix_size, matrix_size)
+            
+            # Compute matrix multiplication composition
+            # First matrix multiplication across the N-1 dimension
+            context_matrix = jnp.einsum('...ij,...jk->...ik', matrix_latents[..., 0, :, :], matrix_latents[..., 1, :, :])
+            for i in range(2, matrix_latents.shape[-3]):
+                context_matrix = jnp.einsum('...ij,...jk->...ik', context_matrix, matrix_latents[..., i, :, :])
+            
+            # Reshape back to vector
+            context = context_matrix.reshape(*context_matrix.shape[:-2], -1)  # (*B, N, H)
+            
+            # Compute the loss for each pair using the matrix composition. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "all":
             # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
@@ -116,6 +144,19 @@ class LPN(nn.Module):
                 leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
             )  # (*B, N, H)
             # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+        elif mode == "ant_colony":
+            for arg in ["num_ants", "num_iterations"]:
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'ant_colony' training mode."
+            key = self.make_rng("ant_colony")
+            # Repeat all the pairs and grid shapes except the one to leave out.
+            leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
+            leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
+            # Get the best context for each pair using ant colony optimization.
+            context, _ = self._get_ant_colony_context(
+                leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
+            )  # (*B, N, H)
+            # Compute the loss for each pair using the context from the ant colony. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         else:
             raise ValueError(f"Unsupported mode: {mode}")
@@ -291,7 +332,7 @@ class LPN(nn.Module):
         input_grid_shape: chex.Array,
         key: Optional[chex.PRNGKey],
         dropout_eval: bool,
-        mode: Literal["mean", "first", "random_search", "gradient_ascent"],
+        mode: Literal["mean", "first", "random_search", "gradient_ascent", "sum", "matrix"],
         return_two_best: bool = False,
         **mode_kwargs,
     ):
@@ -315,7 +356,7 @@ class LPN(nn.Module):
                 "gradient_ascent" mode when using random_perturbations, and in variational inference. None
                 or shape (*B, 2). If None, the key is not used.
             dropout_eval: if false dropout is applied otherwise it is not.
-            mode: mode of the forward pass. Can be "mean", "first", or "random_search".
+            mode: mode of the forward pass. Can be "mean", "first", "random_search", "gradient_ascent", "sum", or "matrix".
                 - "mean": decodes the output using the mean latent from the (input, output) pairs.
                 - "first": decodes the output using the first latent.
                 - "random_search": randomly search for a latent that best explains the (input, output) pairs
@@ -332,6 +373,8 @@ class LPN(nn.Module):
                     'include_mean_latent' (default to True) and 'include_all_latents' (default to False).
                     Computes gradient ascent on decoder likelihood for 'num_steps' steps with learning rate
                     'lr'.
+                - "sum": sums up the latent vectors instead of averaging them.
+                - "matrix": treats latent vectors as matrices and uses matrix multiplication for composition.
             return_two_best: if true returns the two best predictions, otherwise returns the best prediction.
             mode_kwargs: additional keyword arguments for the inference mode (e.g. 'remove_encoder_latents').
 
@@ -358,6 +401,27 @@ class LPN(nn.Module):
             latents = jax.random.normal(key, latents.shape)
         if mode == "mean":
             context = latents.mean(axis=-2)
+            first_context, second_context = context, context
+        elif mode == "sum":
+            context = latents.sum(axis=-2)
+            first_context, second_context = context, context
+        elif mode == "matrix":
+            # Reshape latents into matrices (assuming latent_dim is a perfect square)
+            latent_dim = latents.shape[-1]
+            matrix_size = int(jnp.sqrt(latent_dim))
+            assert matrix_size * matrix_size == latent_dim, f"Latent dimension {latent_dim} must be a perfect square for matrix mode"
+            
+            # Reshape latents into matrices of shape (*B, N, matrix_size, matrix_size)
+            matrix_latents = latents.reshape(*latents.shape[:-1], matrix_size, matrix_size)
+            
+            # Compute matrix multiplication composition
+            # First matrix multiplication across the N dimension
+            context_matrix = jnp.einsum('...ij,...jk->...ik', matrix_latents[..., 0, :, :], matrix_latents[..., 1, :, :])
+            for i in range(2, matrix_latents.shape[-3]):
+                context_matrix = jnp.einsum('...ij,...jk->...ik', context_matrix, matrix_latents[..., i, :, :])
+            
+            # Reshape back to vector
+            context = context_matrix.reshape(*context_matrix.shape[:-2], -1)  # (*B, H)
             first_context, second_context = context, context
         elif mode == "first":
             context = latents[..., 0, :]
@@ -892,6 +956,181 @@ class LPN(nn.Module):
             )
             last_non_padded_logits.append(end_of_row_logits)
         return jnp.concatenate(last_non_padded_logits, axis=-2)
+
+    def _get_ant_colony_context(
+        self,
+        latents: chex.Array,
+        pairs: chex.Array,
+        grid_shapes: chex.Array,
+        key: chex.PRNGKey,
+        num_ants: int = 10,
+        num_iterations: int = 50,
+        evaporation_rate: float = 0.1,
+        alpha: float = 1.0,  # pheromone importance
+        beta: float = 2.0,   # heuristic importance
+        initial_pheromone: float = 1.0,
+        include_mean_latent: bool = True,
+        include_all_latents: bool = False,
+        **kwargs,
+    ):
+        """Returns the best context using Ant Colony Optimization in the latent space.
+
+        Args:
+            latents: latents from the encoder. Shape (*B, N, H).
+            pairs: input data as tokens. Shape (*B, N, R, C, 2).
+            grid_shapes: shapes of the grids. Shape (*B, N, 2, 2).
+            key: random key for initialization and ant movement.
+            num_ants: number of ants in the colony.
+            num_iterations: number of iterations for the ACO algorithm.
+            evaporation_rate: rate at which pheromone evaporates.
+            alpha: parameter controlling the importance of pheromone.
+            beta: parameter controlling the importance of heuristic information.
+            initial_pheromone: initial pheromone value for all paths.
+            include_mean_latent: if true, includes the mean latent in the initial points.
+            include_all_latents: if true, includes all pair latents in the initial points.
+
+        Returns:
+            best_context: best context found by the ant colony. Shape (*B, H).
+            second_best_context: second best context found. Shape (*B, H).
+        """
+        # Prepare initial latents
+        initial_latents = self._prepare_latents_before_search(
+            include_mean_latent, include_all_latents, latents
+        )
+        
+        # Flatten input/output for decoding likelihood
+        input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
+        
+        def compute_heuristic(latent: chex.Array) -> chex.Array:
+            """Compute heuristic value (log probability) for a given latent."""
+            latent = latent[..., None, :].repeat(output_seq.shape[-2], axis=-2)
+            row_logits, col_logits, grid_logits = self.decoder(
+                input_seq, output_seq, latent, dropout_eval=True
+            )
+            return self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq)
+        
+        def initialize_pheromone_matrix(shape: tuple) -> chex.Array:
+            """Initialize pheromone matrix with initial values."""
+            return jnp.ones(shape) * initial_pheromone
+        
+        def update_pheromone(
+            pheromone: chex.Array,
+            paths: chex.Array,
+            path_values: chex.Array,
+            evaporation_rate: float
+        ) -> chex.Array:
+            """Update pheromone levels based on ant paths and their values."""
+            # Evaporate existing pheromone
+            pheromone = (1 - evaporation_rate) * pheromone
+            
+            # Add new pheromone based on path values
+            pheromone_update = jnp.zeros_like(pheromone)
+            for i in range(paths.shape[0]):
+                path = paths[i]
+                value = path_values[i]
+                pheromone_update = pheromone_update.at[path].add(value)
+            
+            return pheromone + pheromone_update
+        
+        def select_next_point(
+            current_point: chex.Array,
+            pheromone: chex.Array,
+            heuristic: chex.Array,
+            key: chex.PRNGKey,
+            alpha: float,
+            beta: float
+        ) -> chex.Array:
+            """Select next point based on pheromone and heuristic values."""
+            # Calculate probabilities
+            probabilities = (pheromone ** alpha) * (heuristic ** beta)
+            probabilities = probabilities / (jnp.sum(probabilities) + 1e-10)
+            
+            # Sample next point
+            key, subkey = jax.random.split(key)
+            next_point_idx = jax.random.categorical(subkey, probabilities)
+            return next_point_idx
+        
+        def ant_path(
+            start_point: chex.Array,
+            pheromone: chex.Array,
+            heuristic: chex.Array,
+            key: chex.PRNGKey,
+            num_steps: int,
+            alpha: float,
+            beta: float
+        ) -> tuple[chex.Array, chex.Array]:
+            """Generate a path for a single ant."""
+            def step(carry, _):
+                current_point, key = carry
+                key, subkey = jax.random.split(key)
+                next_point = select_next_point(
+                    current_point, pheromone, heuristic, subkey, alpha, beta
+                )
+                return (next_point, key), next_point
+            
+            (final_point, _), path = jax.lax.scan(
+                step, (start_point, key), None, length=num_steps
+            )
+            path_value = compute_heuristic(final_point)
+            return path, path_value
+        
+        # Initialize pheromone matrix
+        pheromone = initialize_pheromone_matrix(initial_latents.shape[:-1])
+        
+        # Main ACO loop
+        def iteration_step(carry, _):
+            pheromone, key = carry
+            key, subkey = jax.random.split(key)
+            
+            # Generate paths for all ants
+            start_points = jax.random.randint(
+                subkey, (num_ants,), 0, initial_latents.shape[0]
+            )
+            
+            paths = []
+            path_values = []
+            for i in range(num_ants):
+                path, value = ant_path(
+                    start_points[i],
+                    pheromone,
+                    compute_heuristic(initial_latents),
+                    key,
+                    num_iterations,
+                    alpha,
+                    beta
+                )
+                paths.append(path)
+                path_values.append(value)
+            
+            paths = jnp.array(paths)
+            path_values = jnp.array(path_values)
+            
+            # Update pheromone
+            pheromone = update_pheromone(pheromone, paths, path_values, evaporation_rate)
+            
+            return (pheromone, key), (paths, path_values)
+        
+        # Run ACO iterations
+        (final_pheromone, _), (all_paths, all_values) = jax.lax.scan(
+            iteration_step,
+            (pheromone, key),
+            None,
+            length=num_iterations
+        )
+        
+        # Find best paths
+        best_path_idx = jnp.argmax(all_values)
+        best_path = all_paths[best_path_idx]
+        second_best_path_idx = jnp.argmax(
+            jnp.where(jnp.arange(len(all_values)) != best_path_idx, all_values, -jnp.inf)
+        )
+        second_best_path = all_paths[second_best_path_idx]
+        
+        # Convert paths to latents
+        best_context = initial_latents[best_path[-1]]
+        second_best_context = initial_latents[second_best_path[-1]]
+        
+        return best_context, second_best_context
 
 
 if __name__ == "__main__":
