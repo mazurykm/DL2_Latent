@@ -1114,6 +1114,7 @@ class LPN(nn.Module):
         """Helper function to compute matrix context."""
         # Get the shape of the input latents
         batch_shape = latents.shape[:-1]
+        latent_dim = latents.shape[-1]
         
         # Create a static shape for reshaping
         static_shape = (*batch_shape, int(matrix_size), int(matrix_size))
@@ -1126,8 +1127,8 @@ class LPN(nn.Module):
         for i in range(2, latents_reshaped.shape[-3]):
             context = jnp.matmul(context, latents_reshaped[..., i, :, :])
         
-        # Reshape back to vector using static shape
-        return context.reshape(*batch_shape, -1)
+        # Reshape back to vector using the original latent dimension
+        return context.reshape(*batch_shape, latent_dim)
 
 
 if __name__ == "__main__":
