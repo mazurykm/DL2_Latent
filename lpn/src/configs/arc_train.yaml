@@ -43,7 +43,7 @@ eval:
       length: 48
       batch_size: 16
       num_tasks_to_show: 48
-      inference_mode: gradient_ascent
+      inference_mode: matrix
       inference_kwargs:
         num_steps: 1
         lr: 0.1
@@ -57,7 +57,7 @@ eval:
       length: 48
       batch_size: 16
       num_tasks_to_show: 48
-      inference_mode: gradient_ascent
+      inference_mode: matrix
       inference_kwargs:
         num_steps: 20
         lr: 0.1
@@ -75,7 +75,7 @@ eval:
       name: gradient_ascent_20
       only_n_tasks: 100
       num_tasks_to_show: 50
-      inference_mode: gradient_ascent
+      inference_mode: matrix
       inference_kwargs:
         num_steps: 20
         lr: 0.1
@@ -92,7 +92,7 @@ eval:
       name: gradient_ascent_20
       only_n_tasks: 100
       num_tasks_to_show: 50
-      inference_mode: gradient_ascent
+      inference_mode: matrix
       inference_kwargs:
         num_steps: 20
         lr: 0.1
