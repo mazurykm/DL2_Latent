@@ -89,25 +89,27 @@ class LPN(nn.Module):
             # Compute the loss for each pair using the sum of all but one latents. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "matrix":
-            # Reshape latents into matrices (assuming latent_dim is a perfect square)
+            # Reshape latents into matrices and use matrix multiplication
             latent_dim = leave_one_out_latents.shape[-1]
-            matrix_size = int(jnp.sqrt(latent_dim))
-            assert matrix_size * matrix_size == latent_dim, f"Latent dimension {latent_dim} must be a perfect square for matrix mode"
+            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)
+            if matrix_size * matrix_size != latent_dim:
+                raise ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")
             
-            # Reshape latents into matrices of shape (*B, N, N-1, matrix_size, matrix_size)
-            matrix_latents = leave_one_out_latents.reshape(*leave_one_out_latents.shape[:-1], matrix_size, matrix_size)
+            # Reshape latents into matrices
+            latents_reshaped = leave_one_out_latents.reshape(
+                *leave_one_out_latents.shape[:-1], matrix_size, matrix_size
+            )
             
-            # Compute matrix multiplication composition
-            # First matrix multiplication across the N-1 dimension
-            context_matrix = jnp.einsum('...ij,...jk->...ik', matrix_latents[..., 0, :, :], matrix_latents[..., 1, :, :])
-            for i in range(2, matrix_latents.shape[-3]):
-                context_matrix = jnp.einsum('...ij,...jk->...ik', context_matrix, matrix_latents[..., i, :, :])
+            # Compute context using matrix multiplication
+            context = jnp.matmul(latents_reshaped[..., 0, :, :], latents_reshaped[..., 1, :, :])
+            for i in range(2, latents_reshaped.shape[-3]):
+                context = jnp.matmul(context, latents_reshaped[..., i, :, :])
             
             # Reshape back to vector
-            context = context_matrix.reshape(*context_matrix.shape[:-2], -1)  # (*B, N, H)
+            context = context.reshape(*context.shape[:-2], -1)
             
-            # Compute the loss for each pair using the matrix composition. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            # Compute loss
+            loss = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "all":
             # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
             loss, metrics = jax.vmap(
@@ -406,23 +408,27 @@ class LPN(nn.Module):
             context = latents.sum(axis=-2)
             first_context, second_context = context, context
         elif mode == "matrix":
-            # Reshape latents into matrices (assuming latent_dim is a perfect square)
+            # Reshape latents into matrices and use matrix multiplication
             latent_dim = latents.shape[-1]
-            matrix_size = int(jnp.sqrt(latent_dim))
-            assert matrix_size * matrix_size == latent_dim, f"Latent dimension {latent_dim} must be a perfect square for matrix mode"
+            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)
+            if matrix_size * matrix_size != latent_dim:
+                raise ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")
             
-            # Reshape latents into matrices of shape (*B, N, matrix_size, matrix_size)
-            matrix_latents = latents.reshape(*latents.shape[:-1], matrix_size, matrix_size)
+            # Reshape latents into matrices
+            latents_reshaped = latents.reshape(
+                *latents.shape[:-1], matrix_size, matrix_size
+            )
             
-            # Compute matrix multiplication composition
-            # First matrix multiplication across the N dimension
-            context_matrix = jnp.einsum('...ij,...jk->...ik', matrix_latents[..., 0, :, :], matrix_latents[..., 1, :, :])
-            for i in range(2, matrix_latents.shape[-3]):
-                context_matrix = jnp.einsum('...ij,...jk->...ik', context_matrix, matrix_latents[..., i, :, :])
+            # Compute context using matrix multiplication
+            context = jnp.matmul(latents_reshaped[..., 0, :, :], latents_reshaped[..., 1, :, :])
+            for i in range(2, latents_reshaped.shape[-3]):
+                context = jnp.matmul(context, latents_reshaped[..., i, :, :])
             
             # Reshape back to vector
-            context = context_matrix.reshape(*context_matrix.shape[:-2], -1)  # (*B, H)
-            first_context, second_context = context, context
+            context = context.reshape(*context.shape[:-2], -1)
+            
+            # Compute loss
+            loss, _ = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "first":
             context = latents[..., 0, :]
             first_context, second_context = context, context
