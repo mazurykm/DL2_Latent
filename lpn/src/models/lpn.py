@@ -91,17 +91,8 @@ class LPN(nn.Module):
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             latent_dim = leave_one_out_latents.shape[-1]
-            # Check if latent_dim is a perfect square by comparing with the square of its integer square root
-            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)
-            is_perfect_square = jnp.equal(matrix_size * matrix_size, latent_dim)
-            
-            def compute_context():
-                return self._compute_matrix_context(leave_one_out_latents, matrix_size)
-            
-            def raise_error():
-                raise ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")
-            
-            context = jax.lax.cond(is_perfect_square, compute_context, raise_error)
+            matrix_size = int(jnp.sqrt(latent_dim))  # Convert to Python int for static shape
+            context = self._compute_matrix_context(leave_one_out_latents, matrix_size)
             
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
@@ -405,17 +396,8 @@ class LPN(nn.Module):
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             latent_dim = latents.shape[-1]
-            # Check if latent_dim is a perfect square by comparing with the square of its integer square root
-            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)
-            is_perfect_square = jnp.equal(matrix_size * matrix_size, latent_dim)
-            
-            def compute_context():
-                return self._compute_matrix_context(latents, matrix_size)
-            
-            def raise_error():
-                raise ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")
-            
-            context = jax.lax.cond(is_perfect_square, compute_context, raise_error)
+            matrix_size = int(jnp.sqrt(latent_dim))  # Convert to Python int for static shape
+            context = self._compute_matrix_context(latents, matrix_size)
             
             # Compute loss
             loss, _ = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
@@ -1130,18 +1112,22 @@ class LPN(nn.Module):
 
     def _compute_matrix_context(self, latents, matrix_size):
         """Helper function to compute matrix context."""
-        # Reshape latents into matrices
-        latents_reshaped = latents.reshape(
-            *latents.shape[:-1], matrix_size, matrix_size
-        )
+        # Get the shape of the input latents
+        batch_shape = latents.shape[:-1]
+        
+        # Create a static shape for reshaping
+        static_shape = (*batch_shape, int(matrix_size), int(matrix_size))
+        
+        # Reshape latents into matrices using static shape
+        latents_reshaped = latents.reshape(static_shape)
         
         # Compute context using matrix multiplication
         context = jnp.matmul(latents_reshaped[..., 0, :, :], latents_reshaped[..., 1, :, :])
         for i in range(2, latents_reshaped.shape[-3]):
             context = jnp.matmul(context, latents_reshaped[..., i, :, :])
         
-        # Reshape back to vector
-        return context.reshape(*context.shape[:-2], -1)
+        # Reshape back to vector using static shape
+        return context.reshape(*batch_shape, -1)
 
 
 if __name__ == "__main__":
