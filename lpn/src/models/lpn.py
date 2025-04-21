@@ -91,21 +91,17 @@ class LPN(nn.Module):
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             latent_dim = leave_one_out_latents.shape[-1]
+            # Check if latent_dim is a perfect square by comparing with the square of its integer square root
             matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)
-            
-            # Check if latent_dim is a perfect square using JAX operations
             is_perfect_square = jnp.equal(matrix_size * matrix_size, latent_dim)
-            context = jax.lax.cond(
-                is_perfect_square,
-                lambda _: self._compute_matrix_context(leave_one_out_latents, matrix_size),
-                lambda _: jax.lax.cond(
-                    True,  # This will always be True, triggering the error branch
-                    lambda _: (_ for _ in ()).throw(ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")),
-                    lambda _: None,
-                    None
-                ),
-                None
-            )
+            
+            def compute_context():
+                return self._compute_matrix_context(leave_one_out_latents, matrix_size)
+            
+            def raise_error():
+                raise ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")
+            
+            context = jax.lax.cond(is_perfect_square, compute_context, raise_error)
             
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
@@ -409,21 +405,17 @@ class LPN(nn.Module):
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             latent_dim = latents.shape[-1]
+            # Check if latent_dim is a perfect square by comparing with the square of its integer square root
             matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)
-            
-            # Check if latent_dim is a perfect square using JAX operations
             is_perfect_square = jnp.equal(matrix_size * matrix_size, latent_dim)
-            context = jax.lax.cond(
-                is_perfect_square,
-                lambda _: self._compute_matrix_context(latents, matrix_size),
-                lambda _: jax.lax.cond(
-                    True,  # This will always be True, triggering the error branch
-                    lambda _: (_ for _ in ()).throw(ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")),
-                    lambda _: None,
-                    None
-                ),
-                None
-            )
+            
+            def compute_context():
+                return self._compute_matrix_context(latents, matrix_size)
+            
+            def raise_error():
+                raise ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")
+            
+            context = jax.lax.cond(is_perfect_square, compute_context, raise_error)
             
             # Compute loss
             loss, _ = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
