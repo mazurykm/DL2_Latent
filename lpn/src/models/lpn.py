@@ -92,21 +92,20 @@ class LPN(nn.Module):
             # Reshape latents into matrices and use matrix multiplication
             latent_dim = leave_one_out_latents.shape[-1]
             matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)
-            if matrix_size * matrix_size != latent_dim:
-                raise ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")
             
-            # Reshape latents into matrices
-            latents_reshaped = leave_one_out_latents.reshape(
-                *leave_one_out_latents.shape[:-1], matrix_size, matrix_size
+            # Check if latent_dim is a perfect square using JAX operations
+            is_perfect_square = jnp.equal(matrix_size * matrix_size, latent_dim)
+            context = jax.lax.cond(
+                is_perfect_square,
+                lambda _: self._compute_matrix_context(leave_one_out_latents, matrix_size),
+                lambda _: jax.lax.cond(
+                    True,  # This will always be True, triggering the error branch
+                    lambda _: (_ for _ in ()).throw(ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")),
+                    lambda _: None,
+                    None
+                ),
+                None
             )
-            
-            # Compute context using matrix multiplication
-            context = jnp.matmul(latents_reshaped[..., 0, :, :], latents_reshaped[..., 1, :, :])
-            for i in range(2, latents_reshaped.shape[-3]):
-                context = jnp.matmul(context, latents_reshaped[..., i, :, :])
-            
-            # Reshape back to vector
-            context = context.reshape(*context.shape[:-2], -1)
             
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
@@ -411,21 +410,20 @@ class LPN(nn.Module):
             # Reshape latents into matrices and use matrix multiplication
             latent_dim = latents.shape[-1]
             matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)
-            if matrix_size * matrix_size != latent_dim:
-                raise ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")
             
-            # Reshape latents into matrices
-            latents_reshaped = latents.reshape(
-                *latents.shape[:-1], matrix_size, matrix_size
+            # Check if latent_dim is a perfect square using JAX operations
+            is_perfect_square = jnp.equal(matrix_size * matrix_size, latent_dim)
+            context = jax.lax.cond(
+                is_perfect_square,
+                lambda _: self._compute_matrix_context(latents, matrix_size),
+                lambda _: jax.lax.cond(
+                    True,  # This will always be True, triggering the error branch
+                    lambda _: (_ for _ in ()).throw(ValueError(f"Latent dimension {latent_dim} must be a perfect square for matrix mode")),
+                    lambda _: None,
+                    None
+                ),
+                None
             )
-            
-            # Compute context using matrix multiplication
-            context = jnp.matmul(latents_reshaped[..., 0, :, :], latents_reshaped[..., 1, :, :])
-            for i in range(2, latents_reshaped.shape[-3]):
-                context = jnp.matmul(context, latents_reshaped[..., i, :, :])
-            
-            # Reshape back to vector
-            context = context.reshape(*context.shape[:-2], -1)
             
             # Compute loss
             loss, _ = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
@@ -1137,6 +1135,21 @@ class LPN(nn.Module):
         second_best_context = initial_latents[second_best_path[-1]]
         
         return best_context, second_best_context
+
+    def _compute_matrix_context(self, latents, matrix_size):
+        """Helper function to compute matrix context."""
+        # Reshape latents into matrices
+        latents_reshaped = latents.reshape(
+            *latents.shape[:-1], matrix_size, matrix_size
+        )
+        
+        # Compute context using matrix multiplication
+        context = jnp.matmul(latents_reshaped[..., 0, :, :], latents_reshaped[..., 1, :, :])
+        for i in range(2, latents_reshaped.shape[-3]):
+            context = jnp.matmul(context, latents_reshaped[..., i, :, :])
+        
+        # Reshape back to vector
+        return context.reshape(*context.shape[:-2], -1)
 
 
 if __name__ == "__main__":
