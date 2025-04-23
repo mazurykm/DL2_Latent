@@ -377,9 +377,8 @@ class LPN(nn.Module):
                 latents, pairs, grid_shapes, key, **mode_kwargs
             )
         elif mode == "hadamard":
-            leave_one_out_latents = make_leave_one_out(latents, axis=-2)  # (*B, N, N-1, H)
-            norm_latents = leave_one_out_latents / (norm(leave_one_out_latents, axis=-1, keepdims=True) + 1e-5)
-            context = jnp.prod(norm_latents, axis=-2)  # (*B, N, H)
+            norm_latents = latents / (norm(latents, axis=-1, keepdims=True) + 1e-5)  # (*B, N, H)
+            context = jnp.prod(norm_latents, axis=-2)  # (*B, H) - product across all latents
             context = context / (norm(context, axis=-1, keepdims=True) + 1e-5)
             first_context, second_context = context, context
             
