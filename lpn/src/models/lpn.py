@@ -24,7 +24,7 @@ class LPN(nn.Module):
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
-        mode: Literal["mean", "all", "random_search", "gradient_ascent"],
+        mode: Literal["mean", "all", "random_search", "gradient_ascent", "hadamard"],
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
         **mode_kwargs,
@@ -116,6 +116,12 @@ class LPN(nn.Module):
                 leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
             )  # (*B, N, H)
             # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+        elif mode == "hadamard":
+            norm_latents = leave_one_out_latents/(norm(leave_one_out_latents, axis=-1, keepdims=True) + 1e-5) # (*B, N, N-1, H)
+            context = jnp.prod(norm_latents, axis=-2) # (*B, N, H)
+            context = context / (norm(context, axis=-1, keepdims=True) + 1e-5)
+            # Compute the loss for each pair using the context from the hadamard product. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         else:
             raise ValueError(f"Unsupported mode: {mode}")
