@@ -22,7 +22,7 @@ python src/evaluate_checkpoint.py \
   -w alisia-baielli/ARC/fiery-dawn-4--checkpoint:latest \
   -jc json/arc-agi_training_challenges.json \
   -js json/arc-agi_training_solutions.json \
-  -i gradient_ascent \
-  --num-steps 100 \
-  --lr 1.0 \
-  --optimizer adam
+  -i hadamard \
+  #--num-steps 100 \
+  #--lr 1.0 \
+  #--optimizer adam

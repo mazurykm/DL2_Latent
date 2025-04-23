@@ -720,7 +720,7 @@ if __name__ == "__main__":
         )
     if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent", "hadamard"]:
         parser.error(
-            "Invalid inference mode. Choose from ['mean', 'first', 'random_search', 'gradient_ascent']."
+            "Invalid inference mode. Choose from ['mean', 'first', 'random_search', 'gradient_ascent', 'hadamard']."
         )
     if args.inference_mode == "random_search":
         if args.num_samples is None:
