@@ -24,7 +24,7 @@ class LPN(nn.Module):
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
-        mode: Literal["mean", "all", "random_search", "gradient_ascent", "hadamard"],
+        mode: Literal["mean", "all", "random_search", "gradient_ascent"],
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
         **mode_kwargs,
@@ -116,12 +116,6 @@ class LPN(nn.Module):
                 leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
             )  # (*B, N, H)
             # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
-        elif mode == "hadamard":
-            norm_latents = leave_one_out_latents/(norm(leave_one_out_latents, axis=-1, keepdims=True) + 1e-5) # (*B, N, N-1, H)
-            context = jnp.prod(norm_latents, axis=-2) # (*B, N, H)
-            context = context / (norm(context, axis=-1, keepdims=True) + 1e-5)
-            # Compute the loss for each pair using the context from the hadamard product. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         else:
             raise ValueError(f"Unsupported mode: {mode}")
@@ -376,12 +370,6 @@ class LPN(nn.Module):
             first_context, second_context = self._get_random_search_context(
                 latents, pairs, grid_shapes, key, **mode_kwargs
             )
-        elif mode == "hadamard":
-            norm_latents = latents / (norm(latents, axis=-1, keepdims=True) + 1e-5)  # (*B, N, H)
-            context = jnp.prod(norm_latents, axis=-2)  # (*B, H) - product across all latents
-            context = context / (norm(context, axis=-1, keepdims=True) + 1e-5)
-            first_context, second_context = context, context
-            
         elif mode == "gradient_ascent":
             for arg in ["num_steps", "lr"]:
                 assert arg in mode_kwargs, f"'{arg}' argument required for 'gradient_ascent' inference mode."
@@ -627,7 +615,8 @@ class LPN(nn.Module):
             # Use the same latent for all pairs of the same task.
             latents = latents[..., None, :].repeat(output_seq.shape[-2], axis=-2)
             row_logits, col_logits, grid_logits = decoder(input_seq, output_seq, latents, dropout_eval=True)
-            log_probs = self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq)
+            log_probs = self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq,
+	    use_product_score=kwargs.get("use_product_score", False))
             return log_probs
 
         value_and_grad_log_probs_fn = jax.vmap(
@@ -854,6 +843,7 @@ class LPN(nn.Module):
         grid_logits: chex.Array,
         output_seq: chex.Array,
         grid_log_prob_weight: float = 1.0,
+        use_product_score: bool = False,
     ) -> chex.Array:
         """
         Computes the log probabilities of the given output sequence given the row, column and grid logits.
@@ -891,7 +881,12 @@ class LPN(nn.Module):
         grid_log_probs = self._normalized_mean_over_sequence(grid_log_probs, num_rows, num_cols)
 
         log_probs = row_log_probs + col_log_probs + grid_log_prob_weight * grid_log_probs
-        log_probs = jnp.sum(log_probs, axis=-1)  # sum log_probs over the pairs
+       # log_probs = jnp.sum(log_probs, axis=-1)  # sum log_probs over the pairs
+        if use_product_score:
+	        log_probs = jnp.log(jnp.clip(jnp.exp(log_probs).prod(axis=-1), a_min=1e-10))
+        else:
+    	    log_probs = jnp.sum(log_probs, axis=-1)
+
         return log_probs
 
     def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:

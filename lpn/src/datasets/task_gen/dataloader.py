@@ -42,8 +42,8 @@ class JAXDataLoader:
                 max_rows=max_rows,
                 max_cols=max_cols,
             ),
-            timeout=worker_timeout if num_workers > 0 else 0,
-            multiprocessing_context="spawn" if num_workers > 0 else None,
+            timeout=worker_timeout if int(num_workers) > 0 else 0,
+            multiprocessing_context="spawn" if int(num_workers) > 0 else None,
         )
         self.numpy_dataloader = numpy_dataloader
         self.online_data_augmentation = online_data_augmentation

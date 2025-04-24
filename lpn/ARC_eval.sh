@@ -2,9 +2,9 @@
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
 #SBATCH --job-name=ARC_eval
-#SBATCH --ntasks=1
+#SBATCH --ntasks=2
 #SBATCH --cpus-per-task=16
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=/home/scur2570/lpn/out/slurm_output_%A.out
 
 module purge
@@ -19,10 +19,14 @@ export HF_TOKEN = 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
 export PYTHONPATH=${PYTHONPATH}:${PWD}
 
 python src/evaluate_checkpoint.py \
-  -w alisia-baielli/ARC/fiery-dawn-4--checkpoint:latest \
+  -w alisia-baielli/ARC/decent-bee-38--checkpoint:latest \
   -jc json/arc-agi_training_challenges.json \
   -js json/arc-agi_training_solutions.json \
-  -i hadamard \
-  #--num-steps 100 \
-  #--lr 1.0 \
-  #--optimizer adam
+  -i gradient_ascent \
+  --num-steps 10 \
+  --lr 1.0 \
+  --lr-schedule true \
+  --optimizer adam \
+  --optimizer-kwargs '{"b2": 0.9}'
+# \
+  #--use-product-score true
