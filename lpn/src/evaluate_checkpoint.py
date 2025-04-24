@@ -592,7 +592,7 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="mean",
-        help="Inference mode to use, choose from ['mean', 'first', 'random_search', 'gradient_ascent', 'hadamard'].",
+        help="Inference mode to use, choose from ['mean', 'first', 'random_search', 'gradient_ascent'].",
     )
     parser.add_argument(
         "--random-search-seed",
@@ -700,6 +700,15 @@ if __name__ == "__main__":
         help="Random perturbation kwargs. Requires 'num_samples' and 'scale' keys.",
     )
     parser.add_argument(
+        "--use-product-score",
+    	type=true_or_false_from_arg,
+    	required=False,
+    	default=False,
+    	help="Whether to multiply (instead of sum) the log-probabilities at inference time.",
+    )
+ 
+
+    parser.add_argument(
         "--mixed-precision",
         type=true_or_false_from_arg,
         required=False,
@@ -718,9 +727,9 @@ if __name__ == "__main__":
         parser.error(
             "Must provide either the json challenges (-jc) and solutions (-js) files or the dataset folder (-d)."
         )
-    if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent", "hadamard"]:
+    if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent"]:
         parser.error(
-            "Invalid inference mode. Choose from ['mean', 'first', 'random_search', 'gradient_ascent', 'hadamard']."
+            "Invalid inference mode. Choose from ['mean', 'first', 'random_search', 'gradient_ascent']."
         )
     if args.inference_mode == "random_search":
         if args.num_samples is None:
@@ -738,6 +747,9 @@ if __name__ == "__main__":
         "num_steps": args.num_steps,
         "lr": args.lr,
     }
+    if args.use_product_score:
+        inference_mode_kwargs["use_product_score"] = True
+
     for arg in [
         "scan_batch_size",
         "include_mean_latent",
