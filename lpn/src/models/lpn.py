@@ -90,10 +90,11 @@ class LPN(nn.Module):
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
+            print(leave_one_out_latents.shape)
             latent_dim = leave_one_out_latents.shape[-1]
             matrix_size = int(jnp.sqrt(latent_dim))  # Convert to Python int for static shape
             context = self._compute_matrix_context(leave_one_out_latents, matrix_size)
-            
+            # context should be (*B, N, H)
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "all":
@@ -398,9 +399,7 @@ class LPN(nn.Module):
             latent_dim = latents.shape[-1]
             matrix_size = int(jnp.sqrt(latent_dim))  # Convert to Python int for static shape
             context = self._compute_matrix_context(latents, matrix_size)
-            
-            # Compute loss
-            loss, _ = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            first_context, second_context = context, context
         elif mode == "first":
             context = latents[..., 0, :]
             first_context, second_context = context, context
@@ -1142,15 +1141,11 @@ class LPN(nn.Module):
             context = jnp.matmul(context, latents_reshaped[..., i, :, :])
             print(f"Context shape after multiplication: {context.shape}")
         
-        # Reshape the result to match the original latent dimension
-        context_flat = context.reshape(-1, latent_dim)
-        print(f"Flattened context shape: {context_flat.shape}")
-        
-        # Then reshape back to the original batch shape
-        result = context_flat.reshape(*batch_shape, latent_dim)
-        print(f"Final result shape: {result.shape}")
-        
-        return result
+        print(f"Context shape before reshape: {context.shape}")
+        # Simply reshape the last two dimensions into one
+        context = context.reshape(*context.shape[:-2], -1)
+        print(f"Context shape after reshape: {context.shape}")
+        return context
 
 
 if __name__ == "__main__":
