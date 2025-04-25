@@ -1115,8 +1115,11 @@ class LPN(nn.Module):
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
         
+        # Convert matrix_size to a concrete value
+        matrix_size_int = matrix_size.astype(jnp.int32)
+        
         # make a (1,4,3,8,8)
-        static_shape = (*batch_shape, matrix_size, matrix_size)  # Remove int() conversion
+        static_shape = (*batch_shape, matrix_size_int, matrix_size_int)
         latents_reshaped = latents.reshape(static_shape)
         
         # Initialize context with the first matrix
