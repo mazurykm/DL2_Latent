@@ -1112,39 +1112,24 @@ class LPN(nn.Module):
     def _compute_matrix_context(self, latents, matrix_size):
         """Helper function to compute matrix context."""
         # Get the shape of the input latents
-        print(latents.shape)
-        print(matrix_size)
-
+        # latents is (1,4,3,64)
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
-
-        print(f"Input latents shape: {latents.shape}")
-        print(f"Batch shape: {batch_shape}")
-        print(f"Latent dim: {latent_dim}")
-        print(f"Matrix size: {matrix_size}")
         
-        # Create a static shape for reshaping
+        # make a (1,4,3,8,8)
         static_shape = (*batch_shape, int(matrix_size), int(matrix_size))
-        print(f"Static shape: {static_shape}")
-        
-        # Reshape latents into matrices using static shape
         latents_reshaped = latents.reshape(static_shape)
-        print(f"Reshaped latents shape: {latents_reshaped.shape}")
         
         # Initialize context with the first matrix
         context = latents_reshaped[..., 0, :, :]
-        print(f"Initial context shape: {context.shape}")
         
         # Perform matrix multiplication for each subsequent matrix
         for i in range(1, latents_reshaped.shape[-3]):
-            print(f"Multiplying with matrix {i}, shape: {latents_reshaped[..., i, :, :].shape}")
             context = jnp.matmul(context, latents_reshaped[..., i, :, :])
-            print(f"Context shape after multiplication: {context.shape}")
         
-        print(f"Context shape before reshape: {context.shape}")
-        # Simply reshape the last two dimensions into one
+
+        # make a (1,4,64)
         context = context.reshape(*context.shape[:-2], -1)
-        print(f"Context shape after reshape: {context.shape}")
         return context
 
 
