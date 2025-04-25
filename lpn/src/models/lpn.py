@@ -1113,32 +1113,44 @@ class LPN(nn.Module):
     def _compute_matrix_context(self, latents, matrix_size):
         """Helper function to compute matrix context."""
         # Get the shape of the input latents
-        batch_shape = latents.shape[:-1]  # (1, 4, 3)
-        latent_dim = latents.shape[-1]    # 64
+        print(latents.shape)
+        print(matrix_size)
+
+        batch_shape = latents.shape[:-1]
+        latent_dim = latents.shape[-1]
+
+        print(f"Input latents shape: {latents.shape}")
+        print(f"Batch shape: {batch_shape}")
+        print(f"Latent dim: {latent_dim}")
+        print(f"Matrix size: {matrix_size}")
         
         # Create a static shape for reshaping
         static_shape = (*batch_shape, int(matrix_size), int(matrix_size))
+        print(f"Static shape: {static_shape}")
         
         # Reshape latents into matrices using static shape
         latents_reshaped = latents.reshape(static_shape)
+        print(f"Reshaped latents shape: {latents_reshaped.shape}")
         
-        # Initialize context array with the same shape as input
-        context = jnp.zeros_like(latents)
+        # Initialize context with the first matrix
+        context = latents_reshaped[..., 0, :, :]
+        print(f"Initial context shape: {context.shape}")
         
-        # For each batch and pair, perform matrix multiplication
-        for b in range(batch_shape[0]):  # batch dimension
-            for p in range(batch_shape[1]):  # pair dimension
-                # Initialize with first matrix
-                current_matrix = latents_reshaped[b, p, 0, :, :]
-                
-                # Multiply with remaining matrices
-                for m in range(1, batch_shape[2]):  # matrix dimension
-                    current_matrix = jnp.matmul(current_matrix, latents_reshaped[b, p, m, :, :])
-                
-                # Reshape result back to vector and store in context
-                context = context.at[b, p, :].set(current_matrix.reshape(-1))
+        # Perform matrix multiplication for each subsequent matrix
+        for i in range(1, latents_reshaped.shape[-3]):
+            print(f"Multiplying with matrix {i}, shape: {latents_reshaped[..., i, :, :].shape}")
+            context = jnp.matmul(context, latents_reshaped[..., i, :, :])
+            print(f"Context shape after multiplication: {context.shape}")
         
-        return context
+        # Reshape the result to match the original latent dimension
+        context_flat = context.reshape(-1, latent_dim)
+        print(f"Flattened context shape: {context_flat.shape}")
+        
+        # Then reshape back to the original batch shape
+        result = context_flat.reshape(*batch_shape, latent_dim)
+        print(f"Final result shape: {result.shape}")
+        
+        return result
 
 
 if __name__ == "__main__":
