@@ -92,7 +92,7 @@ class LPN(nn.Module):
             # Reshape latents into matrices and use matrix multiplication
             print(leave_one_out_latents.shape)
             latent_dim = leave_one_out_latents.shape[-1]
-            matrix_size = int(jnp.sqrt(latent_dim))  # Convert to Python int for static shape
+            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
             context = self._compute_matrix_context(leave_one_out_latents, matrix_size)
             # context should be (*B, N, H)
             # Compute loss and metrics
@@ -397,7 +397,7 @@ class LPN(nn.Module):
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             latent_dim = latents.shape[-1]
-            matrix_size = int(jnp.sqrt(latent_dim))  # Convert to Python int for static shape
+            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
             context = self._compute_matrix_context(latents, matrix_size)
             first_context, second_context = context, context
         elif mode == "first":
