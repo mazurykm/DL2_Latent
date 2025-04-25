@@ -1122,14 +1122,20 @@ class LPN(nn.Module):
         # Reshape latents into matrices using static shape
         latents_reshaped = latents.reshape(static_shape)
         
-        # Compute context using matrix multiplication
-        context = jnp.matmul(latents_reshaped[..., 0, :, :], latents_reshaped[..., 1, :, :])
-        for i in range(2, latents_reshaped.shape[-3]):
+        # Initialize context with the first matrix
+        context = latents_reshaped[..., 0, :, :]
+        
+        # Perform matrix multiplication for each subsequent matrix
+        for i in range(1, latents_reshaped.shape[-3]):
+            # Multiply with the next matrix
             context = jnp.matmul(context, latents_reshaped[..., i, :, :])
         
-        context_2d = context.reshape(-1, latent_dim)
-        # Reshape back to vector using the original latent dimension
-        return context_2d.reshape(*batch_shape, latent_dim)
+        # Reshape the result to match the original latent dimension
+        # First flatten the matrix multiplication result
+        context_flat = context.reshape(-1, latent_dim)
+        
+        # Then reshape back to the original batch shape
+        return context_flat.reshape(*batch_shape, latent_dim)
 
 
 if __name__ == "__main__":
