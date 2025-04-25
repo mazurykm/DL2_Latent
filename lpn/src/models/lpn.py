@@ -1111,13 +1111,12 @@ class LPN(nn.Module):
 
     def _compute_matrix_context(self, latents, matrix_size):
         """Helper function to compute matrix context."""
-        # Get the shape of the input latents
         # latents is (1,4,3,64)
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
         
         # make a (1,4,3,8,8)
-        static_shape = (*batch_shape, int(matrix_size), int(matrix_size))
+        static_shape = (*batch_shape, matrix_size, matrix_size)  # Remove int() conversion
         latents_reshaped = latents.reshape(static_shape)
         
         # Initialize context with the first matrix
@@ -1127,7 +1126,6 @@ class LPN(nn.Module):
         for i in range(1, latents_reshaped.shape[-3]):
             context = jnp.matmul(context, latents_reshaped[..., i, :, :])
         
-
         # make a (1,4,64)
         context = context.reshape(*context.shape[:-2], -1)
         return context
