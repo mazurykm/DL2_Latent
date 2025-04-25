@@ -1113,8 +1113,8 @@ class LPN(nn.Module):
     def _compute_matrix_context(self, latents, matrix_size):
         """Helper function to compute matrix context."""
         # Get the shape of the input latents
-        batch_shape = latents.shape[:-1]
-        latent_dim = latents.shape[-1]
+        batch_shape = latents.shape[:-1]  # (1, 4, 3)
+        latent_dim = latents.shape[-1]    # 64
         
         # Create a static shape for reshaping
         static_shape = (*batch_shape, int(matrix_size), int(matrix_size))
@@ -1122,20 +1122,23 @@ class LPN(nn.Module):
         # Reshape latents into matrices using static shape
         latents_reshaped = latents.reshape(static_shape)
         
-        # Initialize context with the first matrix
-        context = latents_reshaped[..., 0, :, :]
+        # Initialize context array with the same shape as input
+        context = jnp.zeros_like(latents)
         
-        # Perform matrix multiplication for each subsequent matrix
-        for i in range(1, latents_reshaped.shape[-3]):
-            # Multiply with the next matrix
-            context = jnp.matmul(context, latents_reshaped[..., i, :, :])
+        # For each batch and pair, perform matrix multiplication
+        for b in range(batch_shape[0]):  # batch dimension
+            for p in range(batch_shape[1]):  # pair dimension
+                # Initialize with first matrix
+                current_matrix = latents_reshaped[b, p, 0, :, :]
+                
+                # Multiply with remaining matrices
+                for m in range(1, batch_shape[2]):  # matrix dimension
+                    current_matrix = jnp.matmul(current_matrix, latents_reshaped[b, p, m, :, :])
+                
+                # Reshape result back to vector and store in context
+                context = context.at[b, p, :].set(current_matrix.reshape(-1))
         
-        # Reshape the result to match the original latent dimension
-        # First flatten the matrix multiplication result
-        context_flat = context.reshape(-1, latent_dim)
-        
-        # Then reshape back to the original batch shape
-        return context_flat.reshape(*batch_shape, latent_dim)
+        return context
 
 
 if __name__ == "__main__":
