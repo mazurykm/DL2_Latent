@@ -266,12 +266,13 @@ class LPN(nn.Module):
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
         # Decode the output sequence (teacher forcing).
+        print(f"context: {context.shape}")
         context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
             matrix_size_cols=matrix_size_cols,
             latents=context,
         )
-
+        print(f"context_matrix: {context_matrix.shape}")
         # initial input 
         current_input = input_seq
 
