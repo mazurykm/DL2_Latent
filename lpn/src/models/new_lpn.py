@@ -202,6 +202,7 @@ class LPN(nn.Module):
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
+        n_cols_context: int = 1,
     ):
         """
         Computes the loss for a single pair given a context.
@@ -211,6 +212,7 @@ class LPN(nn.Module):
             pairs: input data as tokens. Shape (*B, R, C, 2).
             grid_shapes: shapes of the grids. Shape (*B, 2, 2).
             dropout_eval: if false dropout is applied otherwise it is not.
+            n_cols_context: number of columns in the context. Default to 1.
 
         Returns:
             loss: loss value. Shape (*B,).
@@ -222,7 +224,32 @@ class LPN(nn.Module):
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
         # Decode the output sequence (teacher forcing).
-        row_logits, col_logits, grid_logits = self.decoder(input_seq, output_seq, context, dropout_eval)
+        #TODO: change context to view as matrix
+        context_matrix = context.reshape(batch_size, max_cols, -1) #Wojtek change context_matrix
+
+        # initial input 
+        current_input = input_seq
+
+        for t in range(max_cols):
+            # Use context chunk t
+            context_col = context_matrix[:, t, :]
+
+            # Decode
+            row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
+
+            # Predict new shape
+            predicted_rows = jnp.argmax(row_logits, axis=-1) + 1  # because original shapes are [1, max_rows]
+            predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
+
+            # Predict new tokens
+            predicted_tokens = jnp.argmax(grid_logits, axis=-1)  # (B, R*C)
+
+            # Prepare new input for next step
+            predicted_grid_shape_tokens = jnp.stack([predicted_rows, predicted_cols], axis=-1)  # (B, 2)
+            current_input = jnp.concatenate([predicted_grid_shape_tokens, predicted_tokens], axis=-1)
+            
+
+        #row_logits, col_logits, grid_logits = self.decoder(input_seq, output_seq, context, dropout_eval)
 
         # Compute cross entropy losses.
         grid_shapes_row, grid_shapes_col = grid_shapes[..., 0, 1], grid_shapes[..., 1, 1]
