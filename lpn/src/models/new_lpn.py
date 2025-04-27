@@ -24,6 +24,8 @@ class LPN(nn.Module):
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
+        matrix_size_rows: jnp.int32, #new
+        matrix_size_cols: jnp.int32, #new
         mode: Literal["mean", "all", "random_search", "gradient_ascent"],
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
@@ -79,12 +81,12 @@ class LPN(nn.Module):
             # Compute the context vector by taking the mean of all but one latents.
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "all":
             # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
             loss, metrics = jax.vmap(
                 self._loss_from_pair_and_context, in_axes=(-2, None, None, None), out_axes=-1
-            )(leave_one_out_latents, pairs, grid_shapes, dropout_eval)
+            )(leave_one_out_latents, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
             # For logging purposes
             context = latents
             distance_context_latents = norm(latents[..., None, :] - leave_one_out_latents, axis=-1)
@@ -100,7 +102,7 @@ class LPN(nn.Module):
                 leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
             )  # (*B, N, H)
             # Compute the loss for each pair using the context from the random search. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "gradient_ascent":
             for arg in ["num_steps", "lr"]:
                 assert arg in mode_kwargs, f"'{arg}' argument required for 'gradient_ascent' training mode."
@@ -116,7 +118,7 @@ class LPN(nn.Module):
                 leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
             )  # (*B, N, H)
             # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         else:
             raise ValueError(f"Unsupported mode: {mode}")
         leave_one_out_contexts = make_leave_one_out(context, axis=-2)
@@ -196,13 +198,42 @@ class LPN(nn.Module):
         }
         return latents, kl_loss, kl_metrics
 
+    def _convert_to_matrix(
+        self, 
+        matrix_size_rows: jnp.int32,
+        matrix_size_cols: jnp.int32, 
+        latents: chex.Array):
+        """
+        Converts the latents to a matrix.
+        Args:
+            matrix_size_rows: number of rows in the matrix.
+            matrix_size_cols: number of columns in the matrix.
+            latents: latents to be converted. Shape (*B, N, H).
+        Returns:
+            latents_reshaped: latents reshaped to a matrix. Shape (*B, rows, cols).
+        """
+
+        # latents is (1,4,3,64)
+        batch_shape = latents.shape[:-1]
+        latent_dim = latents.shape[-1]
+        
+        # Convert matrix_size to a concrete value
+        # matrix_size_int = matrix_size.astype(jnp.int32)
+        
+        # make a (1,4,3,8,8)
+        static_shape = (*batch_shape, matrix_size_rows, matrix_size_cols)
+        latents_reshaped = latents.reshape(static_shape)
+        
+        return latents_reshaped
+
     def _loss_from_pair_and_context(
         self,
         context: chex.Array,
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
-        n_cols_context: int = 1,
+        matrix_size_cols: int = 1,
+        matrix_size_rows: int = 64,
     ):
         """
         Computes the loss for a single pair given a context.
@@ -224,13 +255,16 @@ class LPN(nn.Module):
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
         # Decode the output sequence (teacher forcing).
-        #TODO: change context to view as matrix
-        context_matrix = context.reshape(batch_size, max_cols, -1) #Wojtek change context_matrix
+        context_matrix = self._convert_to_matrix(
+            matrix_size_rows=matrix_size_rows,
+            matrix_size_cols=matrix_size_cols,
+            latents=context,
+        )
 
         # initial input 
         current_input = input_seq
 
-        for t in range(max_cols):
+        for t in range(matrix_size_cols):
             # Use context chunk t
             context_col = context_matrix[:, t, :]
 
