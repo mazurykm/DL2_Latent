@@ -224,7 +224,10 @@ class LPN(nn.Module):
         # latents is (1,4,3,64)
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
-        
+        print(f"latent_dim: {latent_dim}")
+        print(f"matrix_size_rows: {matrix_size_rows}")
+        print(f"matrix_size_cols: {matrix_size_cols}")
+        print(f"batch_shape: {batch_shape}")
         # Convert matrix_size to a concrete value
         # matrix_size_int = matrix_size.astype(jnp.int32)
         
