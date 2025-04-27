@@ -279,6 +279,11 @@ class LPN(nn.Module):
         for t in range(matrix_size_cols):
             # Use context chunk t
             context_col = context_matrix[:, t, :]
+            print(f"context_col v1: {context_col.shape}")
+
+            #to shape Shape (*B, H)
+            context_col = jnp.reshape(context_col, (*context_col.shape[:-2], -1))
+            print(f"context_col: {context_col.shape}")
 
             # Decode
             row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
