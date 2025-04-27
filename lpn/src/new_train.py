@@ -21,7 +21,7 @@ import hydra
 import omegaconf
 
 
-from src.models.lpn import LPN
+from src.models.new_lpn import LPN
 from src.models.utils import DecoderTransformerConfig, EncoderTransformerConfig
 from src.evaluator import Evaluator
 from src.models.transformer import EncoderTransformer, DecoderTransformer
@@ -96,6 +96,8 @@ class Trainer:
                 dropout_eval=True,
                 prior_kl_coeff=self.prior_kl_coeff,
                 pairwise_kl_coeff=self.pairwise_kl_coeff,
+                matrix_size_rows=self.model.encoder.config.max_rows,
+                matrix_size_cols=self.model.encoder.config.max_cols,
                 mode=self.train_inference_mode,
                 rngs={
                     "random_search": random_search_key,
@@ -318,6 +320,8 @@ class Trainer:
             dropout_eval=False,
             prior_kl_coeff=0.0,  # dummy value for initialization
             pairwise_kl_coeff=0.0,  # dummy value for initialization
+            matrix_size_rows=cfg.training.matrix_size_rows,
+            matrix_size_cols=cfg.training.matrix_size_cols,
             mode=self.train_inference_mode,
             **self.train_inference_kwargs,
         )
@@ -344,6 +348,8 @@ class Trainer:
             dropout_eval=False,
             prior_kl_coeff=self.prior_kl_coeff,
             pairwise_kl_coeff=self.pairwise_kl_coeff,
+            matrix_size_rows=self.model.encoder.config.max_rows, 
+            matrix_size_cols=self.model.encoder.config.max_cols,
             mode=self.train_inference_mode,
             rngs=key,
             **self.train_inference_kwargs,

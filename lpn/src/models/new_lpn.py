@@ -986,7 +986,8 @@ class LPN(nn.Module):
         # matrix_size_int = matrix_size.astype(jnp.int32)
         
         # make a (1,4,3,8,8)
-        static_shape = (*batch_shape, 8, 8)
+        static_shape = (*batch_shape, matrix_size, matrix_size)
+
         latents_reshaped = latents.reshape(static_shape)
         
         # Initialize context with the first matrix
