@@ -134,6 +134,7 @@ class LPN(nn.Module):
             # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "ant_colony":
+            raise NotImplementedError("Ant colony optimization is not working yet.")
             for arg in ["num_ants", "num_iterations"]:
                 assert arg in mode_kwargs, f"'{arg}' argument required for 'ant_colony' training mode."
             key = self.make_rng("ant_colony")
@@ -949,26 +950,7 @@ class LPN(nn.Module):
         include_all_latents: bool = False,
         **kwargs,
     ):
-        """Returns the best context using Ant Colony Optimization in the latent space.
-
-        Args:
-            latents: latents from the encoder. Shape (*B, N, H).
-            pairs: input data as tokens. Shape (*B, N, R, C, 2).
-            grid_shapes: shapes of the grids. Shape (*B, N, 2, 2).
-            key: random key for initialization and ant movement.
-            num_ants: number of ants in the colony.
-            num_iterations: number of iterations for the ACO algorithm.
-            evaporation_rate: rate at which pheromone evaporates.
-            alpha: parameter controlling the importance of pheromone.
-            beta: parameter controlling the importance of heuristic information.
-            initial_pheromone: initial pheromone value for all paths.
-            include_mean_latent: if true, includes the mean latent in the initial points.
-            include_all_latents: if true, includes all pair latents in the initial points.
-
-        Returns:
-            best_context: best context found by the ant colony. Shape (*B, H).
-            second_best_context: second best context found. Shape (*B, H).
-        """
+        """Returns the best context using Ant Colony Optimization in the latent space."""
         # Prepare initial latents
         initial_latents = self._prepare_latents_before_search(
             include_mean_latent, include_all_latents, latents
@@ -979,119 +961,83 @@ class LPN(nn.Module):
         
         def compute_heuristic(latent: chex.Array) -> chex.Array:
             """Compute heuristic value (log probability) for a given latent."""
-            latent = latent[..., None, :].repeat(output_seq.shape[-2], axis=-2)
+            # Reshape latent to match expected shape for decoder
+            # We need to match the batch and sequence dimensions of input_seq/output_seq
+            latent = latent.reshape(1, 1, 1, -1)  # (1, 1, 1, 256)
+            # Repeat to match the sequence length dimension
+            latent = latent.repeat(input_seq.shape[1], axis=1)  # (1, 4, 1, 256)
+            # Repeat to match the number of pairs dimension
+            latent = latent.repeat(input_seq.shape[2], axis=2)  # (1, 4, 3, 256)
+            
             row_logits, col_logits, grid_logits = self.decoder(
                 input_seq, output_seq, latent, dropout_eval=True
             )
             return self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq)
         
-        def initialize_pheromone_matrix(shape: tuple) -> chex.Array:
-            """Initialize pheromone matrix with initial values."""
-            return jnp.ones(shape) * initial_pheromone
+        # Initialize pheromone matrix
+        pheromone = jnp.ones(initial_latents.shape[:-1]) * initial_pheromone
         
-        def update_pheromone(
-            pheromone: chex.Array,
-            paths: chex.Array,
-            path_values: chex.Array,
-            evaporation_rate: float
-        ) -> chex.Array:
-            """Update pheromone levels based on ant paths and their values."""
-            # Evaporate existing pheromone
-            pheromone = (1 - evaporation_rate) * pheromone
-            
-            # Add new pheromone based on path values
-            pheromone_update = jnp.zeros_like(pheromone)
-            for i in range(paths.shape[0]):
-                path = paths[i]
-                value = path_values[i]
-                pheromone_update = pheromone_update.at[path].add(value)
-            
-            return pheromone + pheromone_update
+        # Compute initial heuristic values
+        def compute_heuristic_batch(latent_batch):
+            # latent_batch: (num_latents, latent_dim)
+            results = []
+            for i in range(latent_batch.shape[0]):
+                results.append(compute_heuristic(latent_batch[i]))
+            return jnp.stack(results)
         
-        def select_next_point(
-            current_point: chex.Array,
-            pheromone: chex.Array,
-            heuristic: chex.Array,
-            key: chex.PRNGKey,
-            alpha: float,
-            beta: float
-        ) -> chex.Array:
+        heuristic_values = compute_heuristic_batch(initial_latents)
+        
+        def select_next_point(current_point, pheromone, heuristic, key):
             """Select next point based on pheromone and heuristic values."""
-            # Calculate probabilities
             probabilities = (pheromone ** alpha) * (heuristic ** beta)
             probabilities = probabilities / (jnp.sum(probabilities) + 1e-10)
-            
-            # Sample next point
+            # Ensure probabilities is 1D
+            probabilities = probabilities.flatten()
+            assert probabilities.ndim == 1, f"probabilities must be 1D, got {probabilities.shape}"
+            next_point_idx = jax.random.categorical(key, probabilities)
+            # Ensure we return a scalar
+            return jnp.squeeze(next_point_idx)
+        
+        def ant_step(carry, _):
+            current_point, pheromone, key = carry
             key, subkey = jax.random.split(key)
-            next_point_idx = jax.random.categorical(subkey, probabilities)
-            return next_point_idx
+            next_point = select_next_point(current_point, pheromone, heuristic_values, subkey)
+            # Ensure next_point is a scalar
+            next_point = jnp.array(next_point, dtype=jnp.int32)
+            return (next_point, pheromone, key), next_point
         
-        def ant_path(
-            start_point: chex.Array,
-            pheromone: chex.Array,
-            heuristic: chex.Array,
-            key: chex.PRNGKey,
-            num_steps: int,
-            alpha: float,
-            beta: float
-        ) -> tuple[chex.Array, chex.Array]:
-            """Generate a path for a single ant."""
-            def step(carry, _):
-                current_point, key = carry
-                key, subkey = jax.random.split(key)
-                next_point = select_next_point(
-                    current_point, pheromone, heuristic, subkey, alpha, beta
-                )
-                return (next_point, key), next_point
-            
-            (final_point, _), path = jax.lax.scan(
-                step, (start_point, key), None, length=num_steps
-            )
-            path_value = compute_heuristic(final_point)
-            return path, path_value
-        
-        # Initialize pheromone matrix
-        pheromone = initialize_pheromone_matrix(initial_latents.shape[:-1])
-        
-        # Main ACO loop
-        def iteration_step(carry, _):
+        def colony_step(carry, _):
             pheromone, key = carry
             key, subkey = jax.random.split(key)
             
             # Generate paths for all ants
-            start_points = jax.random.randint(
-                subkey, (num_ants,), 0, initial_latents.shape[0]
-            )
+            start_points = jax.random.randint(subkey, (num_ants,), 0, initial_latents.shape[0])
             
-            paths = []
-            path_values = []
-            for i in range(num_ants):
-                path, value = ant_path(
-                    start_points[i],
-                    pheromone,
-                    compute_heuristic(initial_latents),
-                    key,
-                    num_iterations,
-                    alpha,
-                    beta
+            def ant_path(start_point, key):
+                # Initialize carry with proper shape and type
+                init_point = jnp.array(start_point, dtype=jnp.int32)
+                init_carry = (init_point, pheromone, key)
+                
+                def scan_step(carry, _):
+                    return ant_step(carry, None)
+                
+                (final_point, _, _), path = jax.lax.scan(
+                    scan_step, init_carry, None, length=num_iterations
                 )
-                paths.append(path)
-                path_values.append(value)
+                return path, final_point
             
-            paths = jnp.array(paths)
-            path_values = jnp.array(path_values)
+            paths, final_points = jax.vmap(ant_path)(start_points, jax.random.split(key, num_ants))
             
             # Update pheromone
-            pheromone = update_pheromone(pheromone, paths, path_values, evaporation_rate)
+            pheromone = (1 - evaporation_rate) * pheromone
+            path_values = compute_heuristic_batch(initial_latents[final_points])
+            pheromone = pheromone.at[final_points].add(path_values)
             
             return (pheromone, key), (paths, path_values)
         
         # Run ACO iterations
         (final_pheromone, _), (all_paths, all_values) = jax.lax.scan(
-            iteration_step,
-            (pheromone, key),
-            None,
-            length=num_iterations
+            colony_step, (pheromone, key), None, length=num_iterations
         )
         
         # Find best paths
