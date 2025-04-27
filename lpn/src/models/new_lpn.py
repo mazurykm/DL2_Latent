@@ -82,6 +82,14 @@ class LPN(nn.Module):
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
+        elif mode == "matrix":
+            # Reshape latents into matrices and use matrix multiplication
+            latent_dim = leave_one_out_latents.shape[-1]
+            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
+            context = self._compute_matrix_context(leave_one_out_latents, matrix_size)
+            # context should be (*B, N, H)
+            # Compute loss and metrics
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "all":
             # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
             loss, metrics = jax.vmap(
@@ -352,7 +360,7 @@ class LPN(nn.Module):
         input_grid_shape: chex.Array,
         key: Optional[chex.PRNGKey],
         dropout_eval: bool,
-        mode: Literal["mean", "first", "random_search", "gradient_ascent"],
+        mode: Literal["mean", "first", "random_search", "gradient_ascent", "matrix"],
         return_two_best: bool = False,
         **mode_kwargs,
     ):
@@ -376,7 +384,7 @@ class LPN(nn.Module):
                 "gradient_ascent" mode when using random_perturbations, and in variational inference. None
                 or shape (*B, 2). If None, the key is not used.
             dropout_eval: if false dropout is applied otherwise it is not.
-            mode: mode of the forward pass. Can be "mean", "first", or "random_search".
+            mode: mode of the forward pass. Can be "mean", "first", "matrix", or "random_search".
                 - "mean": decodes the output using the mean latent from the (input, output) pairs.
                 - "first": decodes the output using the first latent.
                 - "random_search": randomly search for a latent that best explains the (input, output) pairs
@@ -393,6 +401,7 @@ class LPN(nn.Module):
                     'include_mean_latent' (default to True) and 'include_all_latents' (default to False).
                     Computes gradient ascent on decoder likelihood for 'num_steps' steps with learning rate
                     'lr'.
+                - "matrix": treats latent vectors as matrices and uses matrix multiplication for composition.
             return_two_best: if true returns the two best predictions, otherwise returns the best prediction.
             mode_kwargs: additional keyword arguments for the inference mode (e.g. 'remove_encoder_latents').
 
@@ -419,6 +428,12 @@ class LPN(nn.Module):
             latents = jax.random.normal(key, latents.shape)
         if mode == "mean":
             context = latents.mean(axis=-2)
+            first_context, second_context = context, context
+        elif mode == "matrix":
+            # Reshape latents into matrices and use matrix multiplication
+            latent_dim = latents.shape[-1]
+            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
+            context = self._compute_matrix_context(latents, matrix_size)
             first_context, second_context = context, context
         elif mode == "first":
             context = latents[..., 0, :]
@@ -961,6 +976,53 @@ class LPN(nn.Module):
             last_non_padded_logits.append(end_of_row_logits)
         return jnp.concatenate(last_non_padded_logits, axis=-2)
 
+    def _compute_matrix_context(self, latents, matrix_size):
+        """Helper function to compute matrix context."""
+        # latents is (1,4,3,64)
+        batch_shape = latents.shape[:-1]
+        latent_dim = latents.shape[-1]
+        
+        # Convert matrix_size to a concrete value
+        # matrix_size_int = matrix_size.astype(jnp.int32)
+        
+        # make a (1,4,3,8,8)
+        static_shape = (*batch_shape, 8, 8)
+        latents_reshaped = latents.reshape(static_shape)
+        
+        # Initialize context with the first matrix
+        context = latents_reshaped[..., 0, :, :]
+        
+        # Perform matrix multiplication for each subsequent matrix
+        for i in range(1, latents_reshaped.shape[-3]):
+            context = jnp.matmul(context, latents_reshaped[..., i, :, :])
+        
+        # make a (1,4,64)
+        context = context.reshape(*context.shape[:-2], -1)
+        return context
+
+    def _compute_matrix_attention_context(self, latents, matrix_size):
+        """Helper function to compute matrix context using cross-attention."""
+        batch_shape = latents.shape[:-2]
+        num_latents = latents.shape[-2]
+        latent_dim = latents.shape[-1]
+
+        assert matrix_size * matrix_size == latent_dim
+
+        latents_reshaped = latents.reshape(*batch_shape, num_latents, matrix_size, matrix_size)
+        latents_seq = latents_reshaped.reshape(*batch_shape, num_latents, -1)
+
+        query = latents_seq.mean(axis=-2, keepdims=True)
+        key = latents_seq  
+        value = latents_seq  
+
+        attn_scores = jnp.einsum('...qd,...kd->...qk', query, key) / jnp.sqrt(latent_dim)
+        attn_weights = jax.nn.softmax(attn_scores, axis=-1) 
+        attended = jnp.einsum('...qk,...kd->...qd', attn_weights, value)  
+        attended = attended.squeeze(axis=-2) 
+        context_matrix = attended.reshape(*batch_shape, matrix_size, matrix_size)
+        context = context_matrix.reshape(*batch_shape, -1)
+
+        return context
 
 if __name__ == "__main__":
     from src.models.utils import TransformerLayerConfig
