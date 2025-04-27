@@ -1,7 +1,7 @@
 training:
   seed: 0
   resume_from_checkpoint: null # null to start from scratch
-  inference_mode: mean  # mean, all, random_search, gradient_ascent
+  inference_mode: matrix  # mean, all, random_search, gradient_ascent
   inference_kwargs:
     num_steps: 1
     lr: 0.1
@@ -19,8 +19,8 @@ training:
   pairwise_kl_coeff: null
   mixed_precision: True  # if True, it uses bfloat16 for activations (params stay in float32)
   online_data_augmentation: True
-  matrix_size_rows: 8       
-  matrix_size_cols: 16 
+  matrix_size_rows: 32       
+  matrix_size_cols: 4 
   task_generator:
     num_workers: 18
     num_pairs: 4
@@ -124,7 +124,7 @@ decoder_transformer:
   _target_: src.models.utils.DecoderTransformerConfig
   max_rows: 30
   max_cols: 30
-  num_layers: 4
+  num_layers: 2
   transformer_layer:
     _target_: src.models.utils.TransformerLayerConfig
     num_heads: 8
