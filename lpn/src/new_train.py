@@ -53,6 +53,7 @@ class Trainer:
         logging.info(f"Number of devices: {self.num_devices}")
         self.devices = jax.local_devices()[: self.num_devices]
         self.model = model
+        self.cfg = cfg
 
         self.batch_size = cfg.training.batch_size
         self.gradient_accumulation_steps = cfg.training.gradient_accumulation_steps
