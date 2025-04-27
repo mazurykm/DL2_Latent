@@ -260,7 +260,7 @@ class LPN(nn.Module):
         config = self.decoder.config
 
         # Make the input and output sequences.
-        input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
+        #input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
         # Decode the output sequence (teacher forcing).
         print(f"context: {context.shape}")
@@ -271,7 +271,8 @@ class LPN(nn.Module):
         )
         print(f"context_matrix: {context_matrix.shape}")
         # initial input 
-        current_input = input_seq
+        current_input = pairs
+        current_shape = grid_shapes
 
         for t in range(matrix_size_cols):
             # Use context chunk t
@@ -280,18 +281,23 @@ class LPN(nn.Module):
 
 
             # Decode
-            row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
+            output_grids, output_shapes = self._generate_output_from_context_v2(
+                context_col, current_input, current_shape, dropout_eval
+            )
+            current_input = output_grids
+            current_shape = output_shapes
+            #row_logits, col_logits, grid_logits = self._generate_output_from_context(current_input, output_seq, context_col, dropout_eval)
 
-            # Predict new shape
-            predicted_rows = jnp.argmax(row_logits, axis=-1) + 1  # because original shapes are [1, max_rows]
-            predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
+            # # Predict new shape
+            # predicted_rows = jnp.argmax(row_logits, axis=-1) + 1  # because original shapes are [1, max_rows]
+            # predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
 
-            # Predict new tokens
-            predicted_tokens = jnp.argmax(grid_logits, axis=-1)  # (B, R*C)
+            # # Predict new tokens
+            # predicted_tokens = jnp.argmax(grid_logits, axis=-1)  # (B, R*C)
 
-            # Prepare new input for next step
-            predicted_grid_shape_tokens = jnp.stack([predicted_rows, predicted_cols], axis=-1)  # (B, 2)
-            current_input = jnp.concatenate([predicted_grid_shape_tokens, predicted_tokens], axis=-1)
+            # # Prepare new input for next step
+            # predicted_grid_shape_tokens = jnp.stack([predicted_rows, predicted_cols], axis=-1)  # (B, 2)
+            # current_input = jnp.concatenate([predicted_grid_shape_tokens, predicted_tokens], axis=-1)
             
 
         #row_logits, col_logits, grid_logits = self.decoder(input_seq, output_seq, context, dropout_eval)
@@ -434,9 +440,7 @@ class LPN(nn.Module):
             first_context, second_context = context, context
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
-            latent_dim = latents.shape[-1]
-            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
-            context = self._compute_matrix_context(latents, matrix_size)
+            context = latents.mean(axis=-2)
             first_context, second_context = context, context
         elif mode == "first":
             context = latents[..., 0, :]
@@ -479,9 +483,63 @@ class LPN(nn.Module):
             )
             return output_grids, output_shapes, info
 
+    def _generate_output_from_context_v2(
+        self, context: chex.Array, input: chex.Array, input_grid_shape: chex.Array, dropout_eval: bool
+    ):
+        flattened_input = jnp.reshape(pairs, (*pairs.shape[:-3], -1, 2))
+        input_seq = jnp.concatenate([grid_shapes[..., 0], flattened_pairs[..., 0]], axis=-1)
+        #output_seq = jnp.concatenate([grid_shapes[..., 1], flattened_pairs[..., 1]], axis=-1)
+
+        #flattened_input = jnp.reshape(input, (*input.shape[:-2], -1))
+        #input_seq = jnp.concatenate([input_grid_shape, flattened_input], axis=-1)
+        output_seq = jnp.zeros_like(input_seq).at[..., :2].set(1)  # Initialize the grid shape tokens to 1.
+
+        def grid_shape_step(output_seq: chex.Array, row: bool) -> chex.Array:
+            row_logits, col_logits, _ = self.decoder(input_seq, output_seq, context, dropout_eval)
+            if row:
+                logits = row_logits
+            else:
+                logits = col_logits
+            # +1 to shift the tokens to [1, max_rows] or [1, max_cols]
+            new_token = jnp.argmax(logits, axis=-1).astype(output_seq.dtype) + 1
+            output_seq = output_seq.at[..., int(not row)].set(new_token)
+            return output_seq
+
+        # First predict the number of rows and then the number of columns.
+        output_seq = grid_shape_step(output_seq, row=True)
+        output_seq = grid_shape_step(output_seq, row=False)
+        output_shapes = output_seq[..., :2]
+        max_cols = self.decoder.config.max_cols
+
+        def one_step(decoder: DecoderTransformer, output_seq: chex.Array, i: int):
+            *_, grid_logits = decoder(input_seq, output_seq, context, dropout_eval)
+            # If we are at the beginning of a new row, the index of the logits to predict the next token is
+            # the index of the last non-padded token of the previous row.
+            logits_index = jnp.where(
+                (i % max_cols == 0) & (i > 0),
+                (i // max_cols - 1) * max_cols + output_shapes[..., 1].astype(jnp.int32),
+                i,
+            )
+            logits = jnp.take_along_axis(grid_logits, logits_index[..., None, None], axis=-2).squeeze(axis=-2)
+            new_token = jnp.argmax(logits, axis=-1).astype(output_seq.dtype)
+            output_seq = output_seq.at[..., 2 + i].set(new_token)  # +2 to skip the grid shapes
+            return output_seq, None
+
+        # Then predict the grid values.
+        output_seq, _ = nn.scan(
+            one_step,
+            variable_broadcast="params",
+            variable_carry="output_seq",
+            split_rngs={"params": False},
+        )(self.decoder, output_seq, jnp.arange(self.decoder.config.max_len))
+        output_grids = jnp.reshape(output_seq[..., 2:], (*input.shape[:-2], *input.shape[-2:]))
+
+        return output_grids, output_shapes
+
     def _generate_output_from_context(
         self, context: chex.Array, input: chex.Array, input_grid_shape: chex.Array, dropout_eval: bool
     ):
+
         flattened_input = jnp.reshape(input, (*input.shape[:-2], -1))
         input_seq = jnp.concatenate([input_grid_shape, flattened_input], axis=-1)
         output_seq = jnp.zeros_like(input_seq).at[..., :2].set(1)  # Initialize the grid shape tokens to 1.
