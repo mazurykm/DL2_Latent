@@ -18,8 +18,21 @@ export WANDB_API_KEY=8e772263ae8e1722c562169fb1c1b602d2d41d2d
 export HF_TOKEN = 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
 export PYTHONPATH=${PYTHONPATH}:${PWD}
 
-python src/evaluate_checkpoint.py \
-  -w alisia-baielli/ARC/decent-bee-38--checkpoint:latest \
+#python src/evaluate_checkpoint.py \
+ # -w alisia-baielli/ARC/decent-bee-38--checkpoint:latest \
+ # -jc json/arc-agi_training_challenges.json \
+ # -js json/arc-agi_training_solutions.json \
+ # -i gradient_ascent \
+ # --num-steps 10 \
+ # --lr 1.0 \
+ # --lr-schedule true \
+ # --optimizer adam \
+ # --optimizer-kwargs '{"b2": 0.9}'
+# \
+  #--use-product-score true
+
+python src/recurrent_evaluate_checkpoint.py \
+  -w alisia-baielli/ARC/silver-fire-64--checkpoint:latest \
   -jc json/arc-agi_training_challenges.json \
   -js json/arc-agi_training_solutions.json \
   -i gradient_ascent \
@@ -28,5 +41,3 @@ python src/evaluate_checkpoint.py \
   --lr-schedule true \
   --optimizer adam \
   --optimizer-kwargs '{"b2": 0.9}'
-# \
-  #--use-product-score true
