@@ -61,6 +61,8 @@ class DecoderTransformerConfig:
     num_layers: int = 2
     max_rows: int = 30
     max_cols: int = 30
+    matrix_size_rows: int = 32
+    matrix_size_cols: int = 4
     scaled_position_embeddings: bool = False
     next_position_embeddings: bool = True
     next_position_embeddings_new_input_embeds: bool = False
@@ -73,6 +75,7 @@ class DecoderTransformerConfig:
         object.__setattr__(self, "dtype", self.transformer_layer.dtype)
         object.__setattr__(self, "emb_dim", self.transformer_layer.emb_dim)
         object.__setattr__(self, "max_len", self.max_rows * self.max_cols)
+        object.__setattr__(self, "matrix_size", self.matrix_size_rows * self.matrix_size_cols)
 
 
 class MlpBlock(nn.Module):
