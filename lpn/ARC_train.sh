@@ -21,4 +21,4 @@ export PYTHONPATH=${PYTHONPATH}:${PWD}
 
 
 #python src/train.py --config-name arc_train
-python src/new_train.py --config-name arc_train
+python src/recurrent_train.py --config-name arc_train

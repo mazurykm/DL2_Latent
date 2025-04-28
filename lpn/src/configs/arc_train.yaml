@@ -18,9 +18,7 @@ training:
   prior_kl_coeff: 1e-4
   pairwise_kl_coeff: null
   mixed_precision: True  # if True, it uses bfloat16 for activations (params stay in float32)
-  online_data_augmentation: True
-  matrix_size_rows: 32       
-  matrix_size_cols: 4 
+  online_data_augmentation: True 
   task_generator:
     num_workers: 18
     num_pairs: 4
@@ -124,6 +122,8 @@ decoder_transformer:
   _target_: src.models.utils.DecoderTransformerConfig
   max_rows: 30
   max_cols: 30
+  matrix_size_rows: 32       
+  matrix_size_cols: 4
   num_layers: 2
   transformer_layer:
     _target_: src.models.utils.TransformerLayerConfig

@@ -21,7 +21,7 @@ import hydra
 import omegaconf
 
 
-from src.models.new_lpn import LPN
+from src.models.recurrent_lpn import LPN
 from src.models.utils import DecoderTransformerConfig, EncoderTransformerConfig
 from src.evaluator import Evaluator
 from src.models.transformer import EncoderTransformer, DecoderTransformer
@@ -97,8 +97,8 @@ class Trainer:
                 dropout_eval=True,
                 prior_kl_coeff=self.prior_kl_coeff,
                 pairwise_kl_coeff=self.pairwise_kl_coeff,
-                matrix_size_rows=self.model.encoder.config.max_rows,
-                matrix_size_cols=self.model.encoder.config.max_cols,
+                matrix_size_rows=self.model.decoder.config.matrix_size_rows,
+                matrix_size_cols=self.model.decoder.config.matrix_size_cols,
                 mode=self.train_inference_mode,
                 rngs={
                     "random_search": random_search_key,
@@ -135,6 +135,8 @@ class Trainer:
                         mode=eval_inference_mode,
                         **eval_inference_mode_kwargs,
                         method=self.model.generate_output,
+                        matrix_size_cols=self.model.decoder.config.matrix_size_cols,
+                        matrix_size_rows=self.model.decoder.config.matrix_size_rows,
                     ),
                     (leave_one_out_grids, leave_one_out_shapes, grids_inputs, shapes_inputs, keys),
                 )
@@ -349,8 +351,8 @@ class Trainer:
             dropout_eval=False,
             prior_kl_coeff=self.prior_kl_coeff,
             pairwise_kl_coeff=self.pairwise_kl_coeff,
-            matrix_size_rows=self.model.encoder.config.max_rows, 
-            matrix_size_cols=self.model.encoder.config.max_cols,
+            matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
+            matrix_size_cols=self.model.decoder.config.matrix_size_cols,
             mode=self.train_inference_mode,
             rngs=key,
             **self.train_inference_kwargs,
