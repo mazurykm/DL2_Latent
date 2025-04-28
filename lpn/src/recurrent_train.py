@@ -323,8 +323,8 @@ class Trainer:
             dropout_eval=False,
             prior_kl_coeff=0.0,  # dummy value for initialization
             pairwise_kl_coeff=0.0,  # dummy value for initialization
-            matrix_size_rows=self.cfg.training.matrix_size_rows,
-            matrix_size_cols=self.cfg.training.matrix_size_cols,
+            matrix_size_rows=self.model.decoder.config.matrix_size_rows,
+            matrix_size_cols=self.model.decoder.config.matrix_size_cols,
             mode=self.train_inference_mode,
             **self.train_inference_kwargs,
         )
