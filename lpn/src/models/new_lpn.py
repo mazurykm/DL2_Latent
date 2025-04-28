@@ -85,7 +85,8 @@ class LPN(nn.Module):
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             latent_dim = leave_one_out_latents.shape[-1]
-            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
+            #matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
+            matrix_size = int(math.sqrt(latent_dim))
             context = self._compute_matrix_context(leave_one_out_latents, matrix_size)
             # context should be (*B, N, H)
             # Compute loss and metrics
@@ -278,12 +279,12 @@ class LPN(nn.Module):
 
         for t in range(matrix_size_cols):
             # Use context chunk t
-            context_col = context_matrix[:, t, :]
+            context_col = context_matrix[:, :, t, :]
             print(f"context_col v1: {context_col.shape}")
 
             #to shape Shape (*B, H)
-            context_col = jnp.reshape(context_col, (*context_col.shape[:-2], -1))
-            print(f"context_col: {context_col.shape}")
+            #context_col = jnp.reshape(context_col, (*context_col.shape[:-2], -1))
+            #print(f"context_col: {context_col.shape}")
 
             # Decode
             row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
@@ -441,7 +442,8 @@ class LPN(nn.Module):
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             latent_dim = latents.shape[-1]
-            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
+            #matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
+            matrix_size = int(math.sqrt(latent_dim))
             context = self._compute_matrix_context(latents, matrix_size)
             first_context, second_context = context, context
         elif mode == "first":
