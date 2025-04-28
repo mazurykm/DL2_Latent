@@ -86,6 +86,9 @@ class LPN(nn.Module):
             # Reshape latents into matrices and use matrix multiplication
             #TODO: make the composition of examples smarter
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
+            # attention composition: 
+            #context = self._compute_cross_attention_context(leave_one_out_latents, matrix_size_rows, matrix_size_cols)
+
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "all":
@@ -277,7 +280,7 @@ class LPN(nn.Module):
         for t in range(matrix_size_cols):
 
             # Get the context for the current column
-            context_col = context_matrix[:, :, t]
+            context_col = context_matrix[:, :, :, t]
             print(f"context_col: {context_col.shape}")
 
             # Get logits
@@ -1140,29 +1143,24 @@ class LPN(nn.Module):
         context = context.reshape(*context.shape[:-2], -1)
         return context
 
-    def _compute_matrix_attention_context(self, latents, matrix_size):
-        """Helper function to compute matrix context using cross-attention."""
-        batch_shape = latents.shape[:-2]
-        num_latents = latents.shape[-2]
-        latent_dim = latents.shape[-1]
+    def _compute_cross_attention_context(self, latents: chex.Array, matrix_size_rows: int, matrix_size_cols: int) -> chex.Array:
+        """ Computes cross-attention over matrices to produce one single matrix context."""
+        batch_size, num_pairs, latent_dim = latents.shape
+        assert latent_dim == matrix_size_rows * matrix_size_cols    
 
-        assert matrix_size * matrix_size == latent_dim
+        latents_matrix = latents.reshape(batch_size, num_pairs, matrix_size_rows * matrix_size_cols) 
 
-        latents_reshaped = latents.reshape(*batch_shape, num_latents, matrix_size, matrix_size)
-        latents_seq = latents_reshaped.reshape(*batch_shape, num_latents, -1)
+        query = latents_matrix.mean(axis=1, keepdims=True)  
+        key = latents_matrix  
+        value = latents_matrix  
 
-        query = latents_seq.mean(axis=-2, keepdims=True)
-        key = latents_seq  
-        value = latents_seq  
-
-        attn_scores = jnp.einsum('...qd,...kd->...qk', query, key) / jnp.sqrt(latent_dim)
+        attn_scores = jnp.einsum('bqh,bkh->bqk', query, key) / jnp.sqrt(matrix_size_rows * matrix_size_cols)
         attn_weights = jax.nn.softmax(attn_scores, axis=-1) 
-        attended = jnp.einsum('...qk,...kd->...qd', attn_weights, value)  
-        attended = attended.squeeze(axis=-2) 
-        context_matrix = attended.reshape(*batch_shape, matrix_size, matrix_size)
-        context = context_matrix.reshape(*batch_shape, -1)
 
-        return context
+        attended = jnp.einsum('bqk,bkh->bqh', attn_weights, value)  
+        attended = attended.squeeze(axis=1) 
+
+        return attended 
 
 if __name__ == "__main__":
     from src.models.utils import TransformerLayerConfig
