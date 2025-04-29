@@ -39,29 +39,31 @@ class Evaluator:
         key: chex.PRNGKey,
     ):
         model = self.model
-        
+
         final_context = model.recurrent_ga_inference(
-            params=params,
-            pairs=pairs,
-            grid_shapes=grid_shapes,
-            input=input,
-            input_grid_shape=input_grid_shape,
-            key=key,
-            num_steps=self.inference_mode_kwargs["num_steps"],
-            lr=self.inference_mode_kwargs["lr"],
-            optimizer_kwargs=self.inference_mode_kwargs.get("optimizer_kwargs", {}),
+        params=params,
+        pairs=pairs,
+        grid_shapes=grid_shapes,
+        key=key,
+        num_steps=self.inference_mode_kwargs["num_steps"],
+        lr=self.inference_mode_kwargs["lr"],
+        optimizer_kwargs=self.inference_mode_kwargs.get("optimizer_kwargs", {}),
         )
 
+        matrix_size_rows = model.encoder.config.max_rows
+        matrix_size_cols = model.encoder.config.max_cols
+
         output_grids, output_shapes = model._generate_output_from_context_v2(
-            final_context,
-            input,
-            input_grid_shape,
-            dropout_eval=True,
-            matrix_size_rows=model.encoder.config.max_rows,
-            matrix_size_cols=model.encoder.config.max_cols,
+        final_context,
+        input,
+        input_grid_shape,
+        dropout_eval=True,
+        matrix_size_rows=matrix_size_rows,
+        matrix_size_cols=matrix_size_cols,
         )
 
         return output_grids, output_shapes
+
 
 
 
