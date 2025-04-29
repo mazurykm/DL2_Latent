@@ -1,6 +1,6 @@
 import unittest
 
-from src.models.lpn import LPN
+from src.models.recurrent_lpn import LPN
 from src.evaluator import Evaluator
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.models.utils import EncoderTransformerConfig, DecoderTransformerConfig

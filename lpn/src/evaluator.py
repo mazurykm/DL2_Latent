@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from tqdm.auto import tqdm
 import numpy as np
 
-from src.models.lpn import LPN
+from src.models.recurrent_lpn import LPN
 from src.datasets.task_gen.re_arc_generators import ARC_TASK_NAMES
 
 
@@ -30,6 +30,8 @@ class Evaluator:
                 return_two_best=True,
                 **inference_mode_kwargs,
                 method=model.generate_output,
+                matrix_size_rows=model.encoder.config.max_rows,
+                matrix_size_cols=model.encoder.config.max_cols,
             ),
             axis_name="devices",
             devices=self.devices[:1],
