@@ -577,3 +577,4 @@ if __name__ == "__main__":
         random_search_seed=args.random_search_seed,
         mixed_precision=args.mixed_precision,
     )
+
