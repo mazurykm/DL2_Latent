@@ -280,7 +280,8 @@ class LPN(nn.Module):
         for t in range(matrix_size_cols):
 
             # Get the context for the current column
-            context_col = context_matrix[:, :, :, t]
+            #context_col = context_matrix[:, :, :, t]
+            context_col = context_matrix[..., t]
             print(f"context_col: {context_col.shape}")
 
             # Get logits
@@ -559,7 +560,7 @@ class LPN(nn.Module):
         current_shape = input_grid_shape
 
         for t in range(matrix_size_cols):
-            context_col = context_matrix[:, :, :, t]  # (B, H, matrix_size_rows)
+            context_col = context_matrix[..., t]  # (B, H, matrix_size_rows)
 
             # Optionally, flatten context_col to match original decoder expectation
             context_col = jnp.reshape(context_col, (context_col.shape[0], -1))  # (B, H * matrix_size_rows)
