@@ -251,8 +251,8 @@ def instantiate_train_state(lpn: LPN) -> TrainState:
         maxval=min(decoder.config.max_rows, decoder.config.max_cols) + 1,
     )
     variables = lpn.init(
-        key, grids, shapes, dropout_eval=False, prior_kl_coeff=0.0, pairwise_kl_coeff=0.0, mode="mean", matrix_size_rows=encoder.config.max_rows,
-                matrix_size_cols=encoder.config.max_cols,
+        key, grids, shapes, dropout_eval=False, prior_kl_coeff=0.0, pairwise_kl_coeff=0.0, mode="mean", matrix_size_rows=encoder.config.matrix_size_rows,
+                matrix_size_cols=encoder.config.matrix_size_cols,
     )
 
     learning_rate, linear_warmup_steps = 0, 0
