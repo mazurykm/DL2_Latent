@@ -237,7 +237,6 @@ def instantiate_model(cfg: omegaconf.DictConfig, mixed_precision: bool) -> LPN:
 def instantiate_train_state(lpn: LPN) -> TrainState:
     key = jax.random.PRNGKey(0)
     decoder = lpn.decoder
-    encoder = lpn.encoder
     grids = jax.random.randint(
         key,
         (1, 3, decoder.config.max_rows, decoder.config.max_cols, 2),
@@ -251,8 +250,8 @@ def instantiate_train_state(lpn: LPN) -> TrainState:
         maxval=min(decoder.config.max_rows, decoder.config.max_cols) + 1,
     )
     variables = lpn.init(
-        key, grids, shapes, dropout_eval=False, prior_kl_coeff=0.0, pairwise_kl_coeff=0.0, mode="mean", matrix_size_rows=encoder.config.matrix_size_rows,
-                matrix_size_cols=encoder.config.matrix_size_cols,
+        key, grids, shapes, dropout_eval=False, prior_kl_coeff=0.0, pairwise_kl_coeff=0.0, mode="mean", matrix_size_rows=decoder.config.matrix_size_rows,
+                matrix_size_cols=decoder.config.matrix_size_cols,
     )
 
     learning_rate, linear_warmup_steps = 0, 0
