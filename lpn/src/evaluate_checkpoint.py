@@ -216,7 +216,7 @@ from tqdm import trange
 from flax.training.train_state import TrainState
 from flax.serialization import from_bytes
 
-from src.models.lpn import LPN
+from src.models.recurrent_lpn import LPN
 from src.evaluator import Evaluator
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.train import Trainer, load_datasets, instantiate_config_for_mpt
