@@ -219,7 +219,7 @@ from flax.serialization import from_bytes
 from src.models.recurrent_lpn import LPN
 from src.evaluator import Evaluator
 from src.models.transformer import EncoderTransformer, DecoderTransformer
-from src.train import Trainer, load_datasets, instantiate_config_for_mpt
+from src.recurrent_train import Trainer, load_datasets, instantiate_config_for_mpt
 from src.data_utils import make_leave_one_out, DATASETS_BASE_PATH
 
 
