@@ -287,15 +287,32 @@ class LPN(nn.Module):
             # Get the context for the current column
             context_col = context_matrix[..., t]
             print(f"context_col: {context_col.shape}")
+            
+            if t < matrix_size_cols - 1:
+       
+                row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
+                    context_col, current_input, current_input, dropout_eval
+                )
+                predicted_rows = jnp.argmax(row_logits, axis=-1) + 1
+                predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
+                predicted_tokens = jnp.argmax(grid_logits, axis=-1)
+                current_input = jnp.concatenate([predicted_rows[..., None], predicted_cols[..., None], predicted_tokens], axis=-1)
+            else:
 
-            # Get logits
-            row_logits, col_logits, grid_logits, current_input = self._generate_logits_from_context(
-                context_col, current_input, output_seq, dropout_eval
-            )
-            if t == matrix_size_cols - 1:
+                row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
+                    context_col, current_input, output_seq, dropout_eval
+                )
                 final_row_logits = row_logits
                 final_col_logits = col_logits
                 final_grid_logits = grid_logits
+            # Get logits
+            #row_logits, col_logits, grid_logits, current_input = self._generate_logits_from_context(
+             #   context_col, current_input, output_seq, dropout_eval
+            #)
+            #if t == matrix_size_cols - 1:
+             #   final_row_logits = row_logits
+              #  final_col_logits = col_logits
+               # final_grid_logits = grid_logits
             # Decode
             #row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
 
