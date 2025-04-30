@@ -691,96 +691,101 @@ class LPN(nn.Module):
         output_grids = jnp.reshape(output_seq[..., 2:], (*input.shape[:-2], *input.shape[-2:]))
 
         return output_grids, output_shapes
-    
 
-    def decode_column_freezing(
-        self,
-        current_input: chex.Array,
-        current_shape: chex.Array,
-        latent_matrix: chex.Array,
-        dropout_eval: bool = True,
-    ):
-        """Recurrently decode by applying latent matrix columns sequentially."""
-        num_columns = latent_matrix.shape[-1]
-
-        for t in range(num_columns):
-            context_col = latent_matrix[..., t]
-
-            flattened_input = jnp.reshape(current_input, (*current_input.shape[:-2], -1))
-            input_seq = jnp.concatenate([current_shape, flattened_input], axis=-1)
-
-            output_seq = jnp.zeros_like(input_seq).at[..., :2].set(1)
-
-            row_logits, col_logits, grid_logits, updated_input_seq = self._generate_logits_from_context(
-            context_col, input_seq, output_seq, dropout_eval
-            )
-
-            current_input = jnp.reshape(updated_input_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
-            current_shape = updated_input_seq[..., :2]
-
-        return row_logits, col_logits, grid_logits, current_input
 
     def recurrent_ga_inference(
-        self,
-        params,
-        pairs: chex.Array,
-        grid_shapes: chex.Array,
-        key: chex.PRNGKey,
-        num_steps: int = 10,
-        lr: float = 1.0,
-        optimizer_kwargs: Optional[dict] = None,
+    self,
+    params,
+    pairs: chex.Array,
+    grid_shapes: chex.Array,
+    test_input: chex.Array,
+    test_input_shape: chex.Array,
+    key: chex.PRNGKey,
+    num_steps: int = 10,
+    lr: float = 1.0,
+    optimizer_kwargs: Optional[dict] = None,
+    dropout_eval: bool = True,
+    matrix_size_rows: int = 32,
+    matrix_size_cols: int = 4,
     ):
-        """Recurrent gradient ascent inference optimizing shared latent matrix column-by-column."""
 
-        latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
+        latents_mu, latents_logvar = self.encoder.apply(
+        params,
+        pairs,
+        grid_shapes,
+        dropout_eval=dropout_eval,
+        )
 
         if latents_logvar is not None:
             latents, *_ = self._sample_latents(latents_mu, latents_logvar, key)
         else:
             latents = latents_mu
 
-        batch_size, num_pairs, latent_dim = latents.shape
-        matrix_size_rows = int(jnp.sqrt(latent_dim))
-        matrix_size_cols = matrix_size_rows
-
-        starting_latent = latents.mean(axis=1)
+        batch_size = pairs.shape[0]
+        starting_latent = latents.mean(axis=1)  
         latent_matrix = starting_latent.reshape(batch_size, matrix_size_rows, matrix_size_cols)
+
+        def compute_initial_avg_loss(latent_matrix):
+            context = latent_matrix.reshape(batch_size, -1)
+            total_loss = 0.0
+            num_context = pairs.shape[1]
+            for i in range(num_context):
+                loss, _ = self._loss_from_pair_and_context(
+                context=context,
+                pairs=pairs[:, i:i+1],
+                grid_shapes=grid_shapes[:, i:i+1],
+                dropout_eval=dropout_eval,
+                matrix_size_rows=matrix_size_rows,
+                matrix_size_cols=matrix_size_cols,
+                )
+                total_loss += loss
+            return total_loss / num_context
+
+        initial_loss = compute_initial_avg_loss(latent_matrix)
 
         optimizer = optax.adam(lr, **(optimizer_kwargs or {}))
         opt_state = optimizer.init(latent_matrix)
 
-        num_columns = matrix_size_cols
+        for col_idx in range(matrix_size_cols):
 
-        for col_idx in range(num_columns):
-
-            def loss_fn(latent_matrix):
+            def compute_avg_loss(latent_matrix):
                 context = latent_matrix.reshape(batch_size, -1)
-                loss, _ = self._loss_from_pair_and_context(
-                context,
-                pairs,
-                grid_shapes,
-                dropout_eval=True,
-                matrix_size_rows=matrix_size_rows,
-                matrix_size_cols=matrix_size_cols,
-                )
-                return jnp.mean(loss)
+                total_loss = 0.0
+                num_context = pairs.shape[1]
+                for i in range(num_context):
+                    loss, _ = self._loss_from_pair_and_context(
+                    context=context,
+                    pairs=pairs[:, i:i+1],
+                    grid_shapes=grid_shapes[:, i:i+1],
+                    dropout_eval=dropout_eval,
+                    matrix_size_rows=matrix_size_rows,
+                    matrix_size_cols=matrix_size_cols,
+                    )
+                    total_loss += loss
+                return total_loss / num_context
 
-            grad_fn = jax.value_and_grad(loss_fn)
+            grad_fn = jax.value_and_grad(compute_avg_loss)
 
             for _ in range(num_steps):
-                frozen_latent = jax.lax.stop_gradient(latent_matrix)
-                frozen_latent = frozen_latent.at[..., col_idx].set(latent_matrix[..., col_idx])
-
-                loss_val, grads = grad_fn(frozen_latent)
-
+                frozen = jax.lax.stop_gradient(
+                latent_matrix.at[..., jnp.arange(matrix_size_cols) != col_idx].set(0.0)
+                )
+                loss_val, grads = grad_fn(frozen)
                 grads = grads.at[..., jnp.arange(matrix_size_cols) != col_idx].set(0.0)
-
                 updates, opt_state = optimizer.update(grads, opt_state)
                 latent_matrix = optax.apply_updates(latent_matrix, updates)
 
         optimized_context = latent_matrix.reshape(batch_size, -1)
+        output_grids, output_shapes = self._generate_output_from_context_v2(
+        context=optimized_context,
+        input=test_input,
+        input_grid_shape=test_input_shape,
+        dropout_eval=dropout_eval,
+        matrix_size_rows=matrix_size_rows,
+        matrix_size_cols=matrix_size_cols,
+        )
 
-        return optimized_context
+        return output_grids, output_shapes, optimized_context
 
 
     def _get_random_search_context(
