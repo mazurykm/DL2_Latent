@@ -16,7 +16,7 @@ from flax.training.train_state import TrainState
 from flax.serialization import from_bytes
 
 from src.models.recurrent_lpn import LPN
-from src.recurrent_evaluator import Evaluator
+from src.evaluator import Evaluator
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.recurrent_train import Trainer, load_datasets, instantiate_config_for_mpt
 from src.data_utils import make_leave_one_out, DATASETS_BASE_PATH
@@ -49,7 +49,8 @@ def instantiate_train_state(lpn: LPN) -> TrainState:
         maxval=min(decoder.config.max_rows, decoder.config.max_cols) + 1,
     )
     variables = lpn.init(
-        key, grids, shapes, dropout_eval=False, prior_kl_coeff=0.0, pairwise_kl_coeff=0.0, mode="mean"
+        key, grids, shapes, dropout_eval=False, prior_kl_coeff=0.0, pairwise_kl_coeff=0.0, mode="mean", matrix_size_rows=decoder.config.matrix_size_rows,
+                matrix_size_cols=decoder.config.matrix_size_cols,
     )
 
     learning_rate, linear_warmup_steps = 0, 0
@@ -527,8 +528,9 @@ if __name__ == "__main__":
             "Must provide either the json challenges (-jc) and solutions (-js) files or the dataset folder (-d)."
         )
     if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent", "matrix"]:
-        parser.error("Invalid inference mode. Choose from ['mean', 'first', 'random_search', 'gradient_ascent', 'matrix'].")
-
+        parser.error(
+            "Invalid inference mode. Choose from ['mean', 'first', 'random_search', 'gradient_ascent']."
+        )
     if args.inference_mode == "random_search":
         if args.num_samples is None:
             parser.error("The 'random_search' inference mode requires the --num-samples argument.")
@@ -577,4 +579,3 @@ if __name__ == "__main__":
         random_search_seed=args.random_search_seed,
         mixed_precision=args.mixed_precision,
     )
-

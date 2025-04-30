@@ -10,9 +10,10 @@ import numpy as np
 from src.models.recurrent_lpn import LPN
 from src.datasets.task_gen.re_arc_generators import ARC_TASK_NAMES
 
+
 class Evaluator:
     def __init__(
-        self, model: LPN, inference_mode: str, inference_mode_kwargs: dict, devices: Optional[list] = None
+        self, model: LPN, inference_mode: str, inference_mode_kwargs: dict, devices: Optional[dict] = None
     ):
         self.model = model
         self.inference_mode = inference_mode
@@ -21,65 +22,37 @@ class Evaluator:
         self.max_cols = self.model.encoder.config.max_cols
         self.devices = devices or jax.local_devices()
         self.debug_msg = False
-
         self.pmap_generate_output = jax.pmap(
-            self.recurrent_inference,
+            partial(
+                model.apply,
+                dropout_eval=True,
+                mode=inference_mode,
+                return_two_best=True,
+                **inference_mode_kwargs,
+                method=model.generate_output,
+                matrix_size_rows=self.model.decoder.config.matrix_size_rows,
+                matrix_size_cols=self.model.decoder.config.matrix_size_cols,
+            ),
             axis_name="devices",
-            devices=self.devices,
-            donate_argnums=(1, 2, 3, 4),  
+            devices=self.devices[:1],
+            donate_argnums=(3, 4),  # donate input and input_grid_shape
         )
-
-    def recurrent_inference(
-        self,
-        params: dict,
-        pairs: chex.Array,
-        grid_shapes: chex.Array,
-        input: chex.Array,
-        input_grid_shape: chex.Array,
-        key: chex.PRNGKey,
-    ):
-        model = self.model
-
-        final_context = model.recurrent_ga_inference(
-        params=params,
-        pairs=pairs,
-        grid_shapes=grid_shapes,
-        key=key,
-        num_steps=self.inference_mode_kwargs["num_steps"],
-        lr=self.inference_mode_kwargs["lr"],
-        optimizer_kwargs=self.inference_mode_kwargs.get("optimizer_kwargs", {}),
-        )
-
-        matrix_size_rows = model.encoder.config.max_rows
-        matrix_size_cols = model.encoder.config.max_cols
-
-        output_grids, output_shapes = model._generate_output_from_context_v2(
-        final_context,
-        input,
-        input_grid_shape,
-        dropout_eval=True,
-        matrix_size_rows=matrix_size_rows,
-        matrix_size_cols=matrix_size_cols,
-        )
-
-        return output_grids, output_shapes
-
-
-
 
     def json_submission(
-        self, challenges: dict[str, list], params: dict,
+        self,
+        challenges: dict[str, list],
+        params: dict,
         only_n_tasks: Optional[int] = None,
         overfit_task: Optional[str] = None,
         progress_bar: bool = False,
         key: Optional[chex.PRNGKey] = None,
         train: bool = False,
     ) -> dict[str, list]:
+        # Only use the first device for the forward pass
         single_device_params = jax.tree_util.tree_map(lambda x: x[:1], params)
         if key is None:
             key = jax.random.PRNGKey(0)
         assert only_n_tasks is None or overfit_task is None, "Cannot use both only_n_tasks and overfit_task."
-
         if overfit_task is not None:
             assert overfit_task in challenges, f"Task {overfit_task} not found in the challenges."
             challenges = {overfit_task: challenges[overfit_task]}
@@ -93,7 +66,10 @@ class Evaluator:
             challenges = {task_name: challenges[task_name] for task_name in task_names[:num_tasks]}
 
         results = {}
-        for task_id, task in tqdm(challenges.items(), total=num_tasks, desc="Generating solutions", disable=not progress_bar):
+        # TODO: maybe vectorize the forward to pass the whole dataset at once, splitting it over devices
+        for task_id, task in tqdm(
+            challenges.items(), total=num_tasks, desc="Generating solutions", disable=not progress_bar
+        ):
             pair_list, shape_list = [], []
             for example in task["train"]:
                 input = jnp.array(example["input"])
@@ -114,12 +90,12 @@ class Evaluator:
                 input_grid_shape = jnp.array(input_grid_shape)
 
                 key, sub_key = jax.random.split(key)
+                # Add batch dim and duplicate to 1 device (pmap is run on 1 device only).
                 b_pairs, b_grid_shapes, b_input, b_input_grid_shape, sub_key = jax.device_put_replicated(
                     (pairs[None], grid_shapes[None], input[None], input_grid_shape[None], sub_key),
                     self.devices[:1],
                 )
-
-                outputs = self.pmap_generate_output(
+                *outputs, _ = self.pmap_generate_output(
                     {"params": single_device_params},
                     b_pairs,
                     b_grid_shapes,
@@ -127,12 +103,14 @@ class Evaluator:
                     b_input_grid_shape,
                     sub_key,
                 )
-                first_output_grid, first_output_shape = jax.tree_util.tree_map(lambda x: x[0, 0], outputs)
-                second_output_grid, second_output_shape = first_output_grid, first_output_shape  
+                # Remove batch dim and device dim
+                first_output_grid, first_output_grid_shape, second_output_grid, second_output_grid_shape = (
+                    jax.tree_util.tree_map(lambda x: x[0, 0], outputs)
+                )
 
-                first_num_rows, first_num_cols = first_output_shape
-                second_num_rows, second_num_cols = second_output_shape
-
+                # Crop the output to the predicted shape
+                first_num_rows, first_num_cols = first_output_grid_shape
+                second_num_rows, second_num_cols = second_output_grid_shape
                 attempts = {
                     "attempt_1": first_output_grid[:first_num_rows, :first_num_cols].tolist(),
                     "attempt_2": second_output_grid[:second_num_rows, :second_num_cols].tolist(),
@@ -141,7 +119,9 @@ class Evaluator:
             results[task_id] = task_outputs
         return results
 
-    def evaluate_generations(self, generations: dict[str, list], solutions: dict[str, list]) -> dict[str, list]:
+    def evaluate_generations(
+        self, generations: dict[str, list], solutions: dict[str, list]
+    ) -> dict[str, list]:
         top_1_num_correct_tasks, top_2_num_correct_tasks = 0.0, 0.0
         top_1_num_correct_shapes, top_2_num_correct_shapes = 0.0, 0.0
         top_1_pixel_correctness, top_2_pixel_correctness = 0.0, 0.0
@@ -191,6 +171,7 @@ class Evaluator:
                 )
                 self.debug_msg = True
             x = x[: self.max_rows, : self.max_cols]
+            # clamp the shape to the max values
             x_shape = (min(x_shape[0], self.max_rows), min(x_shape[1], self.max_cols))
         x = jnp.pad(x, ((0, self.max_rows - x.shape[0]), (0, self.max_cols - x.shape[1])))
         return x, x_shape
