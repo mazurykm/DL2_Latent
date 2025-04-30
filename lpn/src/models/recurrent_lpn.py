@@ -84,14 +84,14 @@ class LPN(nn.Module):
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
+            context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
 
-            #context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # attention composition: 
-            context = self._compute_cross_attention_context(
-                leave_one_out_latents, 
-                matrix_size_rows=matrix_size_rows, 
-                matrix_size_cols=matrix_size_cols
-            )
+            #context = self._compute_cross_attention_context(
+             #   leave_one_out_latents, 
+             #   matrix_size_rows=matrix_size_rows, 
+             #   matrix_size_cols=matrix_size_cols
+            #)
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "all":
@@ -279,6 +279,8 @@ class LPN(nn.Module):
         print(f"context_matrix: {context_matrix.shape}")
         # initial input 
         current_input = input_seq
+        final_row_logits, final_col_logits, final_grid_logits = None, None, None
+
 
         for t in range(matrix_size_cols):
 
@@ -290,7 +292,10 @@ class LPN(nn.Module):
             row_logits, col_logits, grid_logits, current_input = self._generate_logits_from_context(
                 context_col, current_input, output_seq, dropout_eval
             )
-
+            if t == matrix_size_cols - 1:
+                final_row_logits = row_logits
+                final_col_logits = col_logits
+                final_grid_logits = grid_logits
             # Decode
             #row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
 
@@ -312,21 +317,21 @@ class LPN(nn.Module):
         grid_shapes_row, grid_shapes_col = grid_shapes[..., 0, 1], grid_shapes[..., 1, 1]
         # -1 to shift the tokens to [0, max_rows-1]
         one_hot_grid_shapes_row_labels = jax.nn.one_hot(grid_shapes_row - 1, config.max_rows)
-        row_loss = -jnp.sum(jax.nn.log_softmax(row_logits) * one_hot_grid_shapes_row_labels, axis=-1)
+        row_loss = -jnp.sum(jax.nn.log_softmax(final_row_logits) * one_hot_grid_shapes_row_labels, axis=-1)
 
         # -1 to shift the tokens to [0, max_cols-1]
         one_hot_grid_shapes_col_labels = jax.nn.one_hot(grid_shapes_col - 1, config.max_cols)
-        col_loss = -jnp.sum(jax.nn.log_softmax(col_logits) * one_hot_grid_shapes_col_labels, axis=-1)
+        col_loss = -jnp.sum(jax.nn.log_softmax(final_col_logits) * one_hot_grid_shapes_col_labels, axis=-1)
 
         # Copy the grid logits from the last non-padded column of each row to the first column of the next
         # row, skipping the padding tokens.
         last_non_padded_logits = self._get_last_non_padded_logits(
-            grid_logits, grid_shapes_col[..., None, None]
+            final_grid_logits, grid_shapes_col[..., None, None]
         )
-        grid_logits = grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
+        final_grid_logits = final_grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
 
         one_hot_grid_labels = jax.nn.one_hot(pairs[..., 1].reshape(*pairs.shape[:-3], -1), config.vocab_size)
-        grid_losses = -jnp.sum(jax.nn.log_softmax(grid_logits) * one_hot_grid_labels, axis=-1)
+        grid_losses = -jnp.sum(jax.nn.log_softmax(final_grid_logits) * one_hot_grid_labels, axis=-1)
         grid_loss = self._normalized_mean_over_sequence(grid_losses, grid_shapes_row, grid_shapes_col)
 
         loss = row_loss + col_loss + grid_loss
@@ -710,7 +715,7 @@ class LPN(nn.Module):
     ):
         """Recurrent gradient ascent inference optimizing shared latent matrix column-by-column."""
 
-        latents_mu, latents_logvar = self.encoder.apply(params, pairs, grid_shapes, False)
+        latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
 
         if latents_logvar is not None:
             latents, *_ = self._sample_latents(latents_mu, latents_logvar, key)
@@ -1242,11 +1247,9 @@ class LPN(nn.Module):
         print("\n[DEBUG] >>> _compute_cross_attention_context() called.")
         print(f"[DEBUG] Latents shape BEFORE reshape: {latents.shape}")  
 
-    # Input shape: (batch_size, N, N-1, latent_dim)
         batch_size, num_pairs, num_others, latent_dim = latents.shape
         assert latent_dim == matrix_size_rows * matrix_size_cols, f"latent_dim={latent_dim}, expected {matrix_size_rows}*{matrix_size_cols}"
 
-    # latents = (B, N, N-1, H)
         query = latents.mean(axis=-2, keepdims=True)   # (B, N, 1, H)
         key = latents                                   # (B, N, N-1, H)
         value = latents                                 # (B, N, N-1, H)
