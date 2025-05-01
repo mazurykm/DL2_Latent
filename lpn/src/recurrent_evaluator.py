@@ -72,6 +72,7 @@ class Evaluator:
         ):
             pair_list, shape_list = [], []
             for example in task["train"]:
+                print(f"  Processing train example in task: {task_id}", flush=True)
                 input = jnp.array(example["input"])
                 input_shape = input.shape
                 input, input_shape = self.pad_and_crop_json(input, input_shape)
@@ -85,6 +86,7 @@ class Evaluator:
 
             task_outputs = []
             for example in task["test"]:
+                print(f"  Processing test example in task: {task_id}", flush=True)
                 input = jnp.array(example["input"])
                 input, input_grid_shape = self.pad_and_crop_json(input, input.shape)
                 input_grid_shape = jnp.array(input_grid_shape)
