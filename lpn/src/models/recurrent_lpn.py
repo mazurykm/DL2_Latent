@@ -131,6 +131,25 @@ class LPN(nn.Module):
             )  # (*B, N, H)
             # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
+        elif mode == "recurrent_ga":
+            for arg in ["num_steps", "lr"]:
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'recurrent_ga' mode."
+            if mode_kwargs.get("random_perturbation", None) is not None:
+                key = self.make_rng("gradient_ascent_random_perturbation")
+            else:
+                key = None
+            context, _ = self._get_recurrent_ga_context(
+                latents, pairs, grid_shapes, key,
+                matrix_size_rows=matrix_size_rows,
+                matrix_size_cols=matrix_size_cols,
+                **mode_kwargs
+            )
+            loss, metrics = self._loss_from_pair_and_context(
+                context, pairs, grid_shapes, dropout_eval,
+                matrix_size_rows=matrix_size_rows,
+                matrix_size_cols=matrix_size_cols,
+            )
+
         else:
             raise ValueError(f"Unsupported mode: {mode}")
         leave_one_out_contexts = make_leave_one_out(context, axis=-2)
@@ -490,6 +509,17 @@ class LPN(nn.Module):
             first_context, second_context = self._get_gradient_ascent_context(
                 latents, pairs, grid_shapes, key, **mode_kwargs
             )
+        elif mode == "recurrent_ga":
+            first_context, second_context = self._get_recurrent_ga_context(
+            latents, pairs, grid_shapes, key,
+            matrix_size_rows=matrix_size_rows,
+            matrix_size_cols=matrix_size_cols,
+            dropout_eval=dropout_eval,
+            **mode_kwargs
+            )
+            if second_context is None:
+                second_context = first_context
+
         else:
             raise ValueError(f"Unsupported mode: {mode}")
 
@@ -693,99 +723,72 @@ class LPN(nn.Module):
         return output_grids, output_shapes
 
 
-    def recurrent_ga_inference(
-    self,
-    params,
-    pairs: chex.Array,
-    grid_shapes: chex.Array,
-    test_input: chex.Array,
-    test_input_shape: chex.Array,
-    key: chex.PRNGKey,
-    num_steps: int = 10,
-    lr: float = 1.0,
-    optimizer_kwargs: Optional[dict] = None,
-    dropout_eval: bool = True,
-    matrix_size_rows: int = 32,
-    matrix_size_cols: int = 4,
-    ):
-
-        latents_mu, latents_logvar = self.encoder.apply(
-        params,
-        pairs,
-        grid_shapes,
-        dropout_eval=dropout_eval,
-        )
-
-        if latents_logvar is not None:
-            latents, *_ = self._sample_latents(latents_mu, latents_logvar, key)
-        else:
-            latents = latents_mu
-
+    def _get_recurrent_ga_context(
+        self,
+        latents: chex.Array,
+        pairs: chex.Array,
+        grid_shapes: chex.Array,
+        key: Optional[chex.PRNGKey],
+        num_steps: int,
+        lr: float,
+        matrix_size_rows: int,
+        matrix_size_cols: int,
+        optimizer_kwargs: Optional[dict] = None,
+        dropout_eval: bool = True,
+        **kwargs,
+    ) -> tuple[chex.Array, chex.Array]:
+       # print(">>> Entered _get_recurrent_ga_context", flush=True)
         batch_size = pairs.shape[0]
-        starting_latent = latents.mean(axis=1)  
-        latent_matrix = starting_latent.reshape(batch_size, matrix_size_rows, matrix_size_cols)
+        latent_matrix = latents.mean(axis=1).reshape(batch_size, matrix_size_rows, matrix_size_cols)
+        #print(f"    latent_matrix shape: {latent_matrix.shape}", flush=True)
 
-        def compute_initial_avg_loss(latent_matrix):
-            context = latent_matrix.reshape(batch_size, -1)
+        def compute_avg_loss(latent_matrix):
+           # print("    > compute_avg_loss called", flush=True)
+            flat_context = latent_matrix.reshape(batch_size, -1)  # (B, H)
+            flat_context = flat_context[:, None, :]
             total_loss = 0.0
-            num_context = pairs.shape[1]
-            for i in range(num_context):
+            for i in range(pairs.shape[1]):
+               # print(f"        - computing loss for pair {i}", flush=True)
                 loss, _ = self._loss_from_pair_and_context(
-                context=context,
-                pairs=pairs[:, i:i+1],
-                grid_shapes=grid_shapes[:, i:i+1],
-                dropout_eval=dropout_eval,
-                matrix_size_rows=matrix_size_rows,
-                matrix_size_cols=matrix_size_cols,
-                )
-                total_loss += loss
-            return total_loss / num_context
-
-        initial_loss = compute_initial_avg_loss(latent_matrix)
-
-        optimizer = optax.adam(lr, **(optimizer_kwargs or {}))
-        opt_state = optimizer.init(latent_matrix)
-
-        for col_idx in range(matrix_size_cols):
-
-            def compute_avg_loss(latent_matrix):
-                context = latent_matrix.reshape(batch_size, -1)
-                total_loss = 0.0
-                num_context = pairs.shape[1]
-                for i in range(num_context):
-                    loss, _ = self._loss_from_pair_and_context(
-                    context=context,
+                    context=flat_context, 
                     pairs=pairs[:, i:i+1],
                     grid_shapes=grid_shapes[:, i:i+1],
                     dropout_eval=dropout_eval,
                     matrix_size_rows=matrix_size_rows,
                     matrix_size_cols=matrix_size_cols,
-                    )
-                    total_loss += loss
-                return total_loss / num_context
-
-            grad_fn = jax.value_and_grad(compute_avg_loss)
-
-            for _ in range(num_steps):
-                frozen = jax.lax.stop_gradient(
-                latent_matrix.at[..., jnp.arange(matrix_size_cols) != col_idx].set(0.0)
                 )
+                total_loss += loss
+            avg_loss = jnp.mean(total_loss)
+           # print(f"    > compute_avg_loss returning {avg_loss}", flush=True)
+            return avg_loss
+            
+
+
+        optimizer = optax.adam(lr, **(optimizer_kwargs or {}))
+        opt_state = optimizer.init(latent_matrix)
+
+        for col_idx in range(matrix_size_cols):
+           # print(f"  >>> Optimizing column {col_idx}", flush=True)
+            grad_fn = jax.value_and_grad(compute_avg_loss)
+            for step in range(num_steps):
+              #  print(f"    >> Step {step} for column {col_idx}", flush=True)
+                mask = jnp.arange(matrix_size_cols) == col_idx
+                mask = mask.astype(latent_matrix.dtype)
+                mask = mask.reshape((1,) * (latent_matrix.ndim - 1) + (-1,))
+                frozen = latent_matrix * mask
+                #print("      > Calling grad_fn...", flush=True)
                 loss_val, grads = grad_fn(frozen)
-                grads = grads.at[..., jnp.arange(matrix_size_cols) != col_idx].set(0.0)
+               # print(f"      > Loss: {loss_val}", flush=True)
+                grads = grads * mask
+
                 updates, opt_state = optimizer.update(grads, opt_state)
                 latent_matrix = optax.apply_updates(latent_matrix, updates)
+               # print(f"      > Updated latent_matrix", flush=True)
 
         optimized_context = latent_matrix.reshape(batch_size, -1)
-        output_grids, output_shapes = self._generate_output_from_context_v2(
-        context=optimized_context,
-        input=test_input,
-        input_grid_shape=test_input_shape,
-        dropout_eval=dropout_eval,
-        matrix_size_rows=matrix_size_rows,
-        matrix_size_cols=matrix_size_cols,
-        )
+       # print(f"      > Updated latent_matrix", flush=True)
+        return optimized_context, None
 
-        return output_grids, output_shapes, optimized_context
 
 
     def _get_random_search_context(
