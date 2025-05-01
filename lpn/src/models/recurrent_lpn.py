@@ -740,15 +740,14 @@ class LPN(nn.Module):
        # print(">>> Entered _get_recurrent_ga_context", flush=True)
         batch_size = pairs.shape[0]
         latent_matrix = latents.mean(axis=1).reshape(batch_size, matrix_size_rows, matrix_size_cols)
-        #print(f"    latent_matrix shape: {latent_matrix.shape}", flush=True)
+        print(f"    latent_matrix shape: {latent_matrix.shape}", flush=True)
 
         def compute_avg_loss(latent_matrix):
-           # print("    > compute_avg_loss called", flush=True)
             flat_context = latent_matrix.reshape(batch_size, -1)  # (B, H)
             flat_context = flat_context[:, None, :]
             total_loss = 0.0
             for i in range(pairs.shape[1]):
-               # print(f"        - computing loss for pair {i}", flush=True)
+                print(f"        - computing loss for pair {i}", flush=True)
                 loss, _ = self._loss_from_pair_and_context(
                     context=flat_context, 
                     pairs=pairs[:, i:i+1],
@@ -759,34 +758,30 @@ class LPN(nn.Module):
                 )
                 total_loss += loss
             avg_loss = jnp.mean(total_loss)
-           # print(f"    > compute_avg_loss returning {avg_loss}", flush=True)
+            print(f"    > compute_avg_loss returning {avg_loss}", flush=True)
             return avg_loss
             
-
-
         optimizer = optax.adam(lr, **(optimizer_kwargs or {}))
         opt_state = optimizer.init(latent_matrix)
+        
+        grad_fn = jax.value_and_grad(compute_avg_loss)
+
 
         for col_idx in range(matrix_size_cols):
-           # print(f"  >>> Optimizing column {col_idx}", flush=True)
-            grad_fn = jax.value_and_grad(compute_avg_loss)
             for step in range(num_steps):
-              #  print(f"    >> Step {step} for column {col_idx}", flush=True)
+                print(f"    >> Step {step} for column {col_idx}", flush=True)
+                loss_val, grads = grad_fn(latent_matrix)
+
                 mask = jnp.arange(matrix_size_cols) == col_idx
                 mask = mask.astype(latent_matrix.dtype)
                 mask = mask.reshape((1,) * (latent_matrix.ndim - 1) + (-1,))
-                frozen = latent_matrix * mask
-                #print("      > Calling grad_fn...", flush=True)
-                loss_val, grads = grad_fn(frozen)
-               # print(f"      > Loss: {loss_val}", flush=True)
-                grads = grads * mask
+                grads = grads * mask 
 
                 updates, opt_state = optimizer.update(grads, opt_state)
                 latent_matrix = optax.apply_updates(latent_matrix, updates)
-               # print(f"      > Updated latent_matrix", flush=True)
 
         optimized_context = latent_matrix.reshape(batch_size, -1)
-       # print(f"      > Updated latent_matrix", flush=True)
+
         return optimized_context, None
 
 
