@@ -84,14 +84,14 @@ class LPN(nn.Module):
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
-            context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
+            #context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
 
             # attention composition: 
-            #context = self._compute_cross_attention_context(
-             #   leave_one_out_latents, 
-             #   matrix_size_rows=matrix_size_rows, 
-             #   matrix_size_cols=matrix_size_cols
-            #)
+            context = self._compute_cross_attention_context(
+                leave_one_out_latents, 
+                matrix_size_rows=matrix_size_rows, 
+                matrix_size_cols=matrix_size_cols
+            )
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "all":
@@ -1262,18 +1262,27 @@ class LPN(nn.Module):
         context = context.reshape(*context.shape[:-2], -1)
         return context
 
-    def _compute_cross_attention_context(self, latents: chex.Array, matrix_size_rows: int, matrix_size_cols: int) -> chex.Array:
-        """Cross-attend across N-1 latents for each pair separately."""
+    def _compute_cross_attention_context(
+        self, 
+        latents: chex.Array, 
+        matrix_size_rows: int, 
+        matrix_size_cols: int
+    ) -> chex.Array:
+        """ Cross-attend across N-1 latent matrices for each pair separately. """
         print("\n[DEBUG] >>> _compute_cross_attention_context() called.")
-        print(f"[DEBUG] Latents shape BEFORE reshape: {latents.shape}")  
+        print(f"[DEBUG] Latents shape BEFORE reshape: {latents.shape}")
 
         batch_size, num_pairs, num_others, latent_dim = latents.shape
-        assert latent_dim == matrix_size_rows * matrix_size_cols, f"latent_dim={latent_dim}, expected {matrix_size_rows}*{matrix_size_cols}"
+        assert latent_dim == matrix_size_rows * matrix_size_cols
 
-        query = latents.mean(axis=-2, keepdims=True)   # (B, N, 1, H)
-        key = latents                                   # (B, N, N-1, H)
-        value = latents                                 # (B, N, N-1, H)
+        latents_reshaped = latents.reshape(
+        batch_size, num_pairs, num_others, matrix_size_rows, matrix_size_cols
+        )
 
+        key   = latents_reshaped.reshape(batch_size, num_pairs, num_others, -1)  # (B, N, N-1, H)
+        value = key
+
+        query = key.mean(axis=2, keepdims=True)  
         attn_scores = jnp.einsum('bnqh,bnkh->bnqk', query, key) / jnp.sqrt(latent_dim)  # (B, N, 1, N-1)
         attn_weights = jax.nn.softmax(attn_scores, axis=-1)                             # (B, N, 1, N-1)
 
@@ -1283,6 +1292,7 @@ class LPN(nn.Module):
         print(f"[DEBUG] Attended context shape AFTER attention: {attended.shape}")
 
         return attended
+
 
 
 
