@@ -16,7 +16,7 @@ import numpy as np
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.models.utils import EncoderTransformerConfig, DecoderTransformerConfig
 from src.data_utils import make_leave_one_out
-from src.visualize import display_grid  # Make sure this is properly imported
+#from src.visualize import display_grid  # Make sure this is properly imported
 from src.visualize_grads import trace_recurrent_ga_context, visualize_gradient_computation
 
 
