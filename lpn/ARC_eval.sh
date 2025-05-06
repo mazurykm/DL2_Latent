@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=00:10:00
-#SBATCH --output=/home/scur2570/DL2_Latent/lpn/out/slurm_output_%A.out
+#SBATCH --output=/home/scur2570/DL2_Latent/lpn/out/recurrent_eval_save_img_%A.out
 
 module purge
 module load 2023
@@ -32,12 +32,16 @@ export PYTHONPATH=${PYTHONPATH}:${PWD}
   #--use-product-score true
 
 python src/evaluate_checkpoint.py \
-  -w alisia-baielli/ARC/silver-fire-64--checkpoint:latest \
-  -jc json/arc-agi_training_challenges.json \
-  -js json/arc-agi_training_solutions.json \
-  -i matrix # \
-  #--num-steps 10 \
-  #--lr 1.0 \
+  -w alisia-baielli/ARC/generous-energy-77--checkpoint:latest\
+  -jc json/arc-agi_evaluation_challenges.json \
+  -js json/arc-agi_evaluation_solutions.json \
+  -i matrix \
+  --only-n-tasks 5\
+  --save-intermediate-outputs true
+
+  #--num-steps 2 \
+  #--lr 0.1 \
   #--lr-schedule true \
   #--optimizer adam \
-  #--optimizer-kwargs '{"b2": 0.9}'
+  #--optimizer-kwargs '{"b2": 0.9}' \
+  #--only-n-tasks 3
