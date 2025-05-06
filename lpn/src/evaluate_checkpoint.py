@@ -348,10 +348,13 @@ def evaluate_json(
         key=jax.random.PRNGKey(random_search_seed),
         only_n_tasks=only_n_tasks,  # 'None' to run on all tasks
         progress_bar=True,
-        num_tasks_to_show=3,
+        num_tasks_to_show=5,
     )
     metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
     metrics["fig"] = fig
+    #save plt.Figure
+    fig.savefig("output.png")
+    print("Figure saved as output.png")
     return metrics
 
 
