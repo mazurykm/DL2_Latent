@@ -16,6 +16,7 @@ import optax
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.models.utils import EncoderTransformerConfig, DecoderTransformerConfig
 from src.data_utils import make_leave_one_out
+from src.visualize import display_grid  # Make sure this is properly imported
 
 
 class LPN(nn.Module):
@@ -678,11 +679,15 @@ class LPN(nn.Module):
             current_shape = output_shapes
 
             if save_intermediate:
-                unique_run_id = str(uuid.uuid4())[:8]  # Short unique ID for this batch/run
+                unique_run_id = str(uuid.uuid4())[:8]  # Unique ID to avoid overwriting
                 for b in range(current_input.shape[0]):
                     fig, ax = plt.subplots()
-                    ax.imshow(current_input[b])  # auto-detect RGB or grayscale
-                    ax.axis("off")
+
+                    grid_np = np.array(current_input[b])  # Convert from JAX to NumPy
+                    shape_np = np.array(current_shape[b])  # Also convert shape tokens
+
+                    display_grid(ax, grid_np, shape_np)  # Use the utility function
+
                     ax.set_title(f"Step {t}, Sample {b}")
                     filename = f"step_{t}_sample_{b}_{unique_run_id}.png"
                     fig.savefig(os.path.join(save_dir, filename))
