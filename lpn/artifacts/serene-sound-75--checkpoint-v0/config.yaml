@@ -1,0 +1,128 @@
+eval:
+  eval_datasets: null
+  json_datasets:
+  - name: mean
+    solutions: json/arc-agi_training_solutions.json
+    challenges: json/arc-agi_training_challenges.json
+    only_n_tasks: 100
+    num_tasks_to_show: 50
+  - name: gradient_ascent_20
+    solutions: json/arc-agi_training_solutions.json
+    challenges: json/arc-agi_training_challenges.json
+    only_n_tasks: 100
+    inference_mode: gradient_ascent
+    inference_kwargs:
+      lr: 0.1
+      num_steps: 20
+      optimizer: adam
+      optimizer_kwargs:
+        b2: 0.9
+    num_tasks_to_show: 50
+  - name: mean
+    solutions: json/arc-agi_evaluation_solutions.json
+    challenges: json/arc-agi_evaluation_challenges.json
+    only_n_tasks: 100
+    num_tasks_to_show: 50
+  - name: gradient_ascent_20
+    solutions: json/arc-agi_evaluation_solutions.json
+    challenges: json/arc-agi_evaluation_challenges.json
+    only_n_tasks: 100
+    inference_mode: gradient_ascent
+    inference_kwargs:
+      lr: 0.1
+      num_steps: 20
+      optimizer: adam
+      optimizer_kwargs:
+        b2: 0.9
+    num_tasks_to_show: 50
+  test_datasets:
+  - name: generator_mean
+    length: 48
+    generator: ARC
+    num_pairs: 4
+    batch_size: 16
+    num_tasks_to_show: 48
+    task_generator_kwargs: null
+  - name: generator_gradient_ascent_1
+    length: 48
+    generator: ARC
+    num_pairs: 4
+    batch_size: 16
+    inference_mode: gradient_ascent
+    inference_kwargs:
+      lr: 0.1
+      num_steps: 1
+      optimizer: adam
+      optimizer_kwargs:
+        b2: 0.9
+    num_tasks_to_show: 48
+    task_generator_kwargs: null
+  - name: generator_gradient_ascent_20
+    length: 48
+    generator: ARC
+    num_pairs: 4
+    batch_size: 16
+    inference_mode: gradient_ascent
+    inference_kwargs:
+      lr: 0.1
+      num_steps: 20
+      optimizer: adam
+      optimizer_kwargs:
+        b2: 0.9
+    num_tasks_to_show: 48
+    task_generator_kwargs: null
+training:
+  seed: 0
+  batch_size: 128
+  learning_rate: 0.0004
+  inference_mode: matrix
+  prior_kl_coeff: 0.0001
+  task_generator:
+    class: ARC
+    num_pairs: 4
+    num_workers: 18
+  train_datasets: null
+  mixed_precision: true
+  total_num_steps: 5000
+  inference_kwargs:
+    lr: 0.1
+    num_steps: 1
+    optimizer: adam
+    optimizer_kwargs:
+      b2: 0.9
+  eval_every_n_logs: 100
+  log_every_n_steps: 100
+  pairwise_kl_coeff: null
+  resume_from_checkpoint: alisia-baielli/ARC/toasty-sound-74--checkpoint:v0
+  online_data_augmentation: true
+  gradient_accumulation_steps: 32
+  save_checkpoint_every_n_logs: 50
+decoder_transformer:
+  _target_: src.models.utils.DecoderTransformerConfig
+  max_cols: 30
+  max_rows: 30
+  num_layers: 2
+  matrix_size_cols: 4
+  matrix_size_rows: 32
+  transformer_layer:
+    _target_: src.models.utils.TransformerLayerConfig
+    num_heads: 8
+    dropout_rate: 0.0
+    mlp_dim_factor: 4.0
+    emb_dim_per_head: 32
+    attention_dropout_rate: 0.0
+encoder_transformer:
+  _target_: src.models.utils.EncoderTransformerConfig
+  max_cols: 30
+  max_rows: 30
+  latent_dim: 128
+  num_layers: 4
+  variational: true
+  transformer_layer:
+    _target_: src.models.utils.TransformerLayerConfig
+    num_heads: 8
+    dropout_rate: 0.0
+    mlp_dim_factor: 4.0
+    emb_dim_per_head: 32
+    attention_dropout_rate: 0.0
+  latent_projection_bias: false
