@@ -1,6 +1,9 @@
 from typing import Literal, Optional
 import math
 from functools import partial
+import os
+import matplotlib.pyplot as plt 
+import uuid
 
 import chex
 from flax import linen as nn
@@ -534,6 +537,7 @@ class LPN(nn.Module):
                     dropout_eval=dropout_eval,
                     matrix_size_rows=matrix_size_rows,
                     matrix_size_cols=matrix_size_cols,
+                    save_intermediate=mode_kwargs.get("save_intermediate_outputs", False)
                 )
             )(jnp.stack([first_context, second_context], axis=0))
             first_output_grids, second_output_grids = output_grids[0], output_grids[1]
@@ -541,7 +545,8 @@ class LPN(nn.Module):
             return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info
         else:
             output_grids, output_shapes = self._generate_output_from_context_v2(
-                first_context, input, input_grid_shape, dropout_eval, matrix_size_rows, matrix_size_cols
+                first_context, input, input_grid_shape, dropout_eval, matrix_size_rows, matrix_size_cols, mode_kwargs.get("save_intermediate_outputs", False)
+
             )
             return output_grids, output_shapes, info
 
@@ -586,6 +591,8 @@ class LPN(nn.Module):
         dropout_eval: bool,
         matrix_size_rows: int,
         matrix_size_cols: int,
+        save_intermediate: bool = False,
+        save_dir: str = "intermediate_outputs",  # where to save if enabled
     ) -> tuple[chex.Array, chex.Array]:
         """
         Recurrently generates output grids using per-column context, without ground-truth output_seq (generation mode).
@@ -602,6 +609,9 @@ class LPN(nn.Module):
             final_output_grids: predicted output grids, shape (B, R, C)
             final_output_shapes: predicted shapes, shape (B, 2)
         """
+        if save_intermediate:
+            os.makedirs(save_dir, exist_ok=True)
+
         # Convert context vector into matrix (B, H, matrix_size_rows, matrix_size_cols)
         context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
@@ -666,6 +676,17 @@ class LPN(nn.Module):
             # Update current input for next step
             current_input = jnp.reshape(output_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
             current_shape = output_shapes
+
+            if save_intermediate:
+                unique_run_id = str(uuid.uuid4())[:8]  # Short unique ID for this batch/run
+                for b in range(current_input.shape[0]):
+                    fig, ax = plt.subplots()
+                    ax.imshow(current_input[b])  # auto-detect RGB or grayscale
+                    ax.axis("off")
+                    ax.set_title(f"Step {t}, Sample {b}")
+                    filename = f"step_{t}_sample_{b}_{unique_run_id}.png"
+                    fig.savefig(os.path.join(save_dir, filename))
+                    plt.close(fig)
 
         final_output_grids = current_input
         final_output_shapes = current_shape
