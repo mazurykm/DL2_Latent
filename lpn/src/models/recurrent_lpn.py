@@ -26,7 +26,7 @@ class LPN(nn.Module):
         dropout_eval: bool,
         matrix_size_rows: jnp.int32, #new
         matrix_size_cols: jnp.int32, #new
-        mode: Literal["mean", "all", "random_search", "gradient_ascent"],
+        mode: Literal["mean", "all", "random_search", "gradient_ascent", "matrix"],
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
         **mode_kwargs,
@@ -84,14 +84,14 @@ class LPN(nn.Module):
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
-            #context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
+            context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
 
             # attention composition: 
-            context = self._compute_cross_attention_context(
-                leave_one_out_latents, 
-                matrix_size_rows=matrix_size_rows, 
-                matrix_size_cols=matrix_size_cols
-            )
+            #context = self._compute_cross_attention_context(
+             #   leave_one_out_latents, 
+              #  matrix_size_rows=matrix_size_rows, 
+               # matrix_size_cols=matrix_size_cols
+            #)
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "all":
