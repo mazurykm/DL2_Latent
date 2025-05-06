@@ -21,4 +21,7 @@ export PYTHONPATH=${PYTHONPATH}:${PWD}
 
 
 #python src/train.py --config-name arc_train
-python src/recurrent_train.py --config-name arc_train
+python src/recurrent_train.py --config-name arc_train \
+  training.log_gradients=true \
+  training.log_gradients_every=100 \
+  training.inference_kwargs.trace_computation=true
