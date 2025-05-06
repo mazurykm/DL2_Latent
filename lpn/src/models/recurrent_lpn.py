@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from jax.numpy.linalg import norm
 from jax.tree_util import tree_map
 import optax
-
+import numpy as np
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.models.utils import EncoderTransformerConfig, DecoderTransformerConfig
 from src.data_utils import make_leave_one_out
