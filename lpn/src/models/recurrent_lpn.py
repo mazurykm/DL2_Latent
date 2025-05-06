@@ -678,20 +678,20 @@ class LPN(nn.Module):
             current_input = jnp.reshape(output_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
             current_shape = output_shapes
 
-            if save_intermediate:
-                unique_run_id = str(uuid.uuid4())[:8]  # Unique ID to avoid overwriting
-                for b in range(current_input.shape[0]):
-                    fig, ax = plt.subplots()
+            # if save_intermediate:
+            #     unique_run_id = str(uuid.uuid4())[:8]  # Unique ID to avoid overwriting
+            #     for b in range(current_input.shape[0]):
+            #         fig, ax = plt.subplots()
 
-                    grid_np = np.array(current_input[b])  # Convert from JAX to NumPy
-                    shape_np = np.array(current_shape[b])  # Also convert shape tokens
+            #         grid_np = np.array(current_input[b])  # Convert from JAX to NumPy
+            #         shape_np = np.array(current_shape[b])  # Also convert shape tokens
 
-                    display_grid(ax, grid_np, shape_np)  # Use the utility function
+            #         display_grid(ax, grid_np, shape_np)  # Use the utility function
 
-                    ax.set_title(f"Step {t}, Sample {b}")
-                    filename = f"step_{t}_sample_{b}_{unique_run_id}.png"
-                    fig.savefig(os.path.join(save_dir, filename))
-                    plt.close(fig)
+            #         ax.set_title(f"Step {t}, Sample {b}")
+            #         filename = f"step_{t}_sample_{b}_{unique_run_id}.png"
+            #         fig.savefig(os.path.join(save_dir, filename))
+            #         plt.close(fig)
 
         final_output_grids = current_input
         final_output_shapes = current_shape
