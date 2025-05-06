@@ -716,6 +716,16 @@ if __name__ == "__main__":
         default=True,
         help="Whether to use mixed precision for inference.",
     )
+
+    ## New argument
+    parser.add_argument(
+        "--save-intermediate-outputs",
+        type=true_or_false_from_arg,
+        required=False,
+        default=False,
+        help="Whether to save intermediate outputs during inference.",
+    )
+
     args = parser.parse_args()
     if (
         args.json_challenges_file is None
@@ -762,6 +772,7 @@ if __name__ == "__main__":
         "scan_gradients_latents",
         "accumulate_gradients_decoder_pairs",
         "random_perturbation",
+        "save_intermediate_outputs",
     ]:
         if getattr(args, arg) is not None:
             inference_mode_kwargs[arg] = getattr(args, arg)
