@@ -312,13 +312,11 @@ class LPN(nn.Module):
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
         # Decode the output sequence (teacher forcing).
-        print(f"context: {context.shape}")
         context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
             matrix_size_cols=matrix_size_cols,
             latents=context,
         )
-        print(f"context_matrix: {context_matrix.shape}")
         # initial input 
         current_input = input_seq
         final_row_logits, final_col_logits, final_grid_logits = None, None, None
@@ -332,13 +330,21 @@ class LPN(nn.Module):
             
             if t < matrix_size_cols - 1:
        
-                row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
+            #     row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
+            #         context_col, current_input, current_input, dropout_eval
+            #     )
+            #     predicted_rows = jnp.argmax(row_logits, axis=-1) + 1
+            #     predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
+            #     predicted_tokens = jnp.argmax(grid_logits, axis=-1)
+            #     current_input = jnp.concatenate([predicted_rows[..., None], predicted_cols[..., None], predicted_tokens], axis=-1)
+                # Now I predict shape only on final step
+                _, _, grid_logits, _ = self._generate_logits_from_context(
                     context_col, current_input, current_input, dropout_eval
                 )
-                predicted_rows = jnp.argmax(row_logits, axis=-1) + 1
-                predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
+                
                 predicted_tokens = jnp.argmax(grid_logits, axis=-1)
-                current_input = jnp.concatenate([predicted_rows[..., None], predicted_cols[..., None], predicted_tokens], axis=-1)
+                current_input = jnp.concatenate([grid_shapes[..., 0], predicted_tokens], axis=-1)
+            
             else:
 
                 row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
@@ -347,30 +353,6 @@ class LPN(nn.Module):
                 final_row_logits = row_logits
                 final_col_logits = col_logits
                 final_grid_logits = grid_logits
-            # Get logits
-            #row_logits, col_logits, grid_logits, current_input = self._generate_logits_from_context(
-             #   context_col, current_input, output_seq, dropout_eval
-            #)
-            #if t == matrix_size_cols - 1:
-             #   final_row_logits = row_logits
-              #  final_col_logits = col_logits
-               # final_grid_logits = grid_logits
-            # Decode
-            #row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
-
-            # # Predict new shape
-            # predicted_rows = jnp.argmax(row_logits, axis=-1) + 1  # because original shapes are [1, max_rows]
-            # predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
-
-            # # Predict new tokens
-            # predicted_tokens = jnp.argmax(grid_logits, axis=-1)  # (B, R*C)
-
-            # # Prepare new input for next step
-            # predicted_grid_shape_tokens = jnp.stack([predicted_rows, predicted_cols], axis=-1)  # (B, 2)
-            # current_input = jnp.concatenate([predicted_grid_shape_tokens, predicted_tokens], axis=-1)
-            
-
-        #row_logits, col_logits, grid_logits = self.decoder(input_seq, output_seq, context, dropout_eval)
 
         # Compute cross entropy losses.
         grid_shapes_row, grid_shapes_col = grid_shapes[..., 0, 1], grid_shapes[..., 1, 1]
@@ -694,7 +676,11 @@ class LPN(nn.Module):
 
             # Update current input for next step
             current_input = jnp.reshape(output_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
-            current_shape = output_shapes
+            
+            #I change shape only for final step
+            if t >= matrix_size_cols - 1:
+                current_shape = output_shapes
+            
             # Optionally save intermediate outputs
             if save_intermediate:
                 intermediate_outputs[t] = {
