@@ -639,6 +639,8 @@ class LPN(nn.Module):
 
             # Predict grid shape first
             def grid_shape_step(output_seq: chex.Array, row: bool) -> chex.Array:
+                #print all the shapes of the tensors
+                print(f"    input_seq, output_seq, context_col shapes: {input_seq.shape}, {output_seq.shape}, {context_col.shape}", flush=True)
                 row_logits, col_logits, _ = self.decoder(input_seq, output_seq, context_col, dropout_eval)
                 if row:
                     logits = row_logits
