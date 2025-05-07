@@ -417,20 +417,38 @@ class Trainer:
         metrics.update(grad_norm=optax.global_norm(grads))
         return state, metrics
 
-    def train_n_steps(self, state, next_batch, key, n_steps=1):
-        for i in range(n_steps):
-            key, step_key = jax.random.split(key)
-            state, metrics = self.train_one_step(state, next(next_batch), step_key)
-            self.num_steps += 1
-            
-            # Save gradient visualization if available
-            if 'gradient_flow_fig' in metrics:
-                wandb.log({"gradient_flow": wandb.Image(metrics.pop('gradient_flow_fig'))}, step=self.num_steps)
-            
-            # Log all other metrics
-            metrics = tree_map(jnp.mean, metrics)
-            wandb.log(metrics, step=self.num_steps)
-        
+    def train_n_steps(self, state, batches, key, n_steps=1):
+        # When batches is a tuple (grids, shapes), we need to use them directly
+        if isinstance(batches, tuple):
+            grids, shapes = batches
+            for i in range(n_steps):
+                key, step_key = jax.random.split(key)
+                # Use the i-th batch directly
+                state, metrics = self.train_one_step(state, (grids[i], shapes[i]), step_key)
+                self.num_steps += 1
+                
+                # Save gradient visualization if available
+                if 'gradient_flow_fig' in metrics:
+                    wandb.log({"gradient_flow": wandb.Image(metrics.pop('gradient_flow_fig'))}, step=self.num_steps)
+                
+                # Log all other metrics
+                metrics = tree_map(jnp.mean, metrics)
+                wandb.log(metrics, step=self.num_steps)
+        else:
+            # Original code for when batches is an iterator
+            for i in range(n_steps):
+                key, step_key = jax.random.split(key)
+                state, metrics = self.train_one_step(state, next(batches), step_key)
+                self.num_steps += 1
+                
+                # Save gradient visualization if available
+                if 'gradient_flow_fig' in metrics:
+                    wandb.log({"gradient_flow": wandb.Image(metrics.pop('gradient_flow_fig'))}, step=self.num_steps)
+                
+                # Log all other metrics
+                metrics = tree_map(jnp.mean, metrics)
+                wandb.log(metrics, step=self.num_steps)
+    
         return state, key
 
     @partial(jax.jit, static_argnames=("self", "log_every_n_steps"), backend="cpu")

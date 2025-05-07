@@ -93,12 +93,14 @@ class EncoderTransformer(nn.Module):
                 num_embeddings=config.max_rows,
                 features=config.emb_dim,
                 dtype=config.dtype,
+                embedding_init=nn.initializers.normal(stddev=0.02),
                 name="pos_row_embed",
             )(jnp.arange(config.max_rows, dtype=jnp.uint8))
             pos_col_embed = nn.Embed(
                 num_embeddings=config.max_cols,
                 features=config.emb_dim,
                 dtype=config.dtype,
+                embedding_init=nn.initializers.normal(stddev=0.02),
                 name="pos_col_embed",
             )(jnp.arange(config.max_cols, dtype=jnp.uint8))
             pos_embed = pos_row_embed[:, None, None, :] + pos_col_embed[None, :, None, :]
