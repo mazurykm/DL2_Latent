@@ -695,7 +695,7 @@ class LPN(nn.Module):
             # Update current input for next step
             current_input = jnp.reshape(output_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
             current_shape = output_shapes
-
+            print(f"_generate_output_from_context_v2: current_shape: {current_shape.shape}")
             # Optionally save intermediate outputs
             if save_intermediate:
                 intermediate_outputs[t] = {
@@ -703,23 +703,10 @@ class LPN(nn.Module):
                     "shape": current_shape,
                     "context": context_col,
                 }
-            # if save_intermediate:
-            #     unique_run_id = str(uuid.uuid4())[:8]  # Unique ID to avoid overwriting
-            #     for b in range(current_input.shape[0]):
-            #         fig, ax = plt.subplots()
-
-            #         grid_np = np.array(current_input[b])  # Convert from JAX to NumPy
-            #         shape_np = np.array(current_shape[b])  # Also convert shape tokens
-
-            #         display_grid(ax, grid_np, shape_np)  # Use the utility function
-
-            #         ax.set_title(f"Step {t}, Sample {b}")
-            #         filename = f"step_{t}_sample_{b}_{unique_run_id}.png"
-            #         fig.savefig(os.path.join(save_dir, filename))
-            #         plt.close(fig)
 
         final_output_grids = current_input
         final_output_shapes = current_shape
+        print(f"_generate_output_from_context_v2: final_output_shapes: {final_output_shapes.shape}")
 
 
         return final_output_grids, final_output_shapes, intermediate_outputs if save_intermediate else None
