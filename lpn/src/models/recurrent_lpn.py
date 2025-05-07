@@ -695,7 +695,6 @@ class LPN(nn.Module):
             # Update current input for next step
             current_input = jnp.reshape(output_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
             current_shape = output_shapes
-            print(f"_generate_output_from_context_v2: current_shape: {current_shape.shape}")
             # Optionally save intermediate outputs
             if save_intermediate:
                 intermediate_outputs[t] = {
@@ -706,7 +705,6 @@ class LPN(nn.Module):
 
         final_output_grids = current_input
         final_output_shapes = current_shape
-        print(f"_generate_output_from_context_v2: final_output_shapes: {final_output_shapes.shape}")
 
 
         return final_output_grids, final_output_shapes, intermediate_outputs if save_intermediate else None
