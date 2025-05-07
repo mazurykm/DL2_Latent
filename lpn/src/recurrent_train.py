@@ -12,7 +12,6 @@ import jax.numpy as jnp
 import optax
 from jax.tree_util import tree_map
 from matplotlib import pyplot as plt
-optaximport 
 from flax.serialization import from_bytes, msgpack_serialize, to_state_dict
 from flax.training.train_state import TrainState
 import tqdm
