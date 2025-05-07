@@ -13,7 +13,7 @@ module load Anaconda3/2023.07-2
 
 source /home/scur2570/lpn-env/bin/activate
  
-cd /home/scur2570/lpn
+cd /home/scur2570/grad_flow/DL2_Latent/lpn
 export WANDB_API_KEY=8e772263ae8e1722c562169fb1c1b602d2d41d2d
 export HF_TOKEN=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
 export HOME=/gpfs/home5/scur2570
