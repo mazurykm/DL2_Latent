@@ -702,7 +702,6 @@ class LPN(nn.Module):
                     "shape": current_shape,
                     "context": context_col,
                 }
-                print(f"Intermediate output at step {t}: {context_col}")
 
         final_output_grids = current_input
         final_output_shapes = current_shape
