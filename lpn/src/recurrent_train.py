@@ -130,7 +130,7 @@ class Trainer:
                 shapes_outputs,
                 keys,
             ):
-                generated_grids_outputs, generated_shapes_outputs, generated_info_outputs = jax.lax.map(
+                generated_grids_outputs, generated_shapes_outputs, generated_info_outputs, _ = jax.lax.map(
                     lambda args: self.model.apply(
                         {"params": params},
                         *args,

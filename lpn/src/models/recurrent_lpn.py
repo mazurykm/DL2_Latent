@@ -549,7 +549,7 @@ class LPN(nn.Module):
         info = {"context": first_context}
 
         if return_two_best:
-            output_grids, output_shapes = jax.vmap(
+            output_grids, output_shapes, intermediate_dict = jax.vmap(
                 partial(
                     self._generate_output_from_context_v2,
                     input=input,
@@ -564,11 +564,11 @@ class LPN(nn.Module):
             first_output_shapes, second_output_shapes = output_shapes[0], output_shapes[1]
             return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info
         else:
-            output_grids, output_shapes = self._generate_output_from_context_v2(
+            output_grids, output_shapes, intermediate_dict = self._generate_output_from_context_v2(
                 first_context, input, input_grid_shape, dropout_eval, matrix_size_rows, matrix_size_cols, mode_kwargs.get("save_intermediate_outputs", False)
 
             )
-            return output_grids, output_shapes, info
+            return output_grids, output_shapes, info, intermediate_dict
 
     def _generate_logits_from_context(
         self,
@@ -612,7 +612,6 @@ class LPN(nn.Module):
         matrix_size_rows: int,
         matrix_size_cols: int,
         save_intermediate: bool = False,
-        save_dir: str = "intermediate_outputs",  # where to save if enabled
     ) -> tuple[chex.Array, chex.Array]:
         """
         Recurrently generates output grids using per-column context, without ground-truth output_seq (generation mode).
@@ -629,9 +628,7 @@ class LPN(nn.Module):
             final_output_grids: predicted output grids, shape (B, R, C)
             final_output_shapes: predicted shapes, shape (B, 2)
         """
-        if save_intermediate:
-            os.makedirs(save_dir, exist_ok=True)
-
+        
         # Convert context vector into matrix (B, H, matrix_size_rows, matrix_size_cols)
         context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
@@ -642,6 +639,8 @@ class LPN(nn.Module):
         # Initialize
         current_input = input
         current_shape = input_grid_shape
+
+        intermediate_outputs = {}
 
         for t in range(matrix_size_cols):
             context_col = context_matrix[..., t]   # (B, H, matrix_size_rows)
@@ -697,6 +696,13 @@ class LPN(nn.Module):
             current_input = jnp.reshape(output_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
             current_shape = output_shapes
 
+            # Optionally save intermediate outputs
+            if save_intermediate:
+                intermediate_outputs[t] = {
+                    "input": current_input,
+                    "shape": current_shape,
+                    "context": context_col,
+                }
             # if save_intermediate:
             #     unique_run_id = str(uuid.uuid4())[:8]  # Unique ID to avoid overwriting
             #     for b in range(current_input.shape[0]):
@@ -715,7 +721,8 @@ class LPN(nn.Module):
         final_output_grids = current_input
         final_output_shapes = current_shape
 
-        return final_output_grids, final_output_shapes
+
+        return final_output_grids, final_output_shapes, intermediate_outputs if save_intermediate else None
 
     def _generate_output_from_context(
         self, context: chex.Array, input: chex.Array, input_grid_shape: chex.Array, dropout_eval: bool
@@ -1454,7 +1461,7 @@ if __name__ == "__main__":
     )
     print("Gradient Ascent Loss:", loss)
 
-    output_grids, output_shapes, _ = jax.jit(
+    output_grids, output_shapes, _, _ = jax.jit(
         lpn.apply,
         static_argnames=[
             "dropout_eval",
@@ -1487,7 +1494,7 @@ if __name__ == "__main__":
     print("Output grids of shape:", output_grids.shape)
     print("Output shapes of shape:", output_shapes.shape)
 
-    output_grids, output_shapes, _ = jax.jit(
+    output_grids, output_shapes, _, _ = jax.jit(
         partial(
             lpn.apply, optimizer_kwargs={"b1": 0.5}, random_perturbation={"num_samples": 3, "scale": 0.5}
         ),
