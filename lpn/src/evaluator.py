@@ -103,6 +103,7 @@ class Evaluator:
                     b_input_grid_shape,
                     sub_key,
                 )
+                
                 # Remove batch dim and device dim
                 first_output_grid, first_output_grid_shape, second_output_grid, second_output_grid_shape = (
                     jax.tree_util.tree_map(lambda x: x[0, 0], outputs)

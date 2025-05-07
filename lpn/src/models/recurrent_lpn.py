@@ -562,7 +562,7 @@ class LPN(nn.Module):
             )(jnp.stack([first_context, second_context], axis=0))
             first_output_grids, second_output_grids = output_grids[0], output_grids[1]
             first_output_shapes, second_output_shapes = output_shapes[0], output_shapes[1]
-            return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info
+            return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info, intermediate_dict
         else:
             output_grids, output_shapes, intermediate_dict = self._generate_output_from_context_v2(
                 first_context, input, input_grid_shape, dropout_eval, matrix_size_rows, matrix_size_cols, mode_kwargs.get("save_intermediate_outputs", False)
