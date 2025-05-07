@@ -9,9 +9,9 @@ import time
 import chex
 import jax
 import jax.numpy as jnp
-import optax
 from jax.tree_util import tree_map
 from matplotlib import pyplot as plt
+import optax
 from flax.serialization import from_bytes, msgpack_serialize, to_state_dict
 from flax.training.train_state import TrainState
 import tqdm
@@ -66,8 +66,6 @@ class Trainer:
         self.pairwise_kl_coeff = cfg.training.get("pairwise_kl_coeff")
         self.train_inference_mode = cfg.training.inference_mode
         self.train_inference_kwargs = cfg.training.get("inference_kwargs") or {}
-        self.log_gradients = cfg.training.get("log_gradients", False)
-        self.log_gradients_every = cfg.training.get("log_gradients_every", 100)
 
         def train_one_step_accumulate(state, batch, key):
             grad_acc = self.gradient_accumulation_steps
@@ -342,95 +340,38 @@ class Trainer:
         optimizer = optax.MultiSteps(optimizer, every_k_schedule=self.gradient_accumulation_steps)
         return TrainState.create(apply_fn=self.model.apply, tx=optimizer, params=variables["params"])
 
-    def train_one_step(self, state: TrainState, batch, key: chex.PRNGKey) -> tuple[TrainState, dict]:
+    def train_one_step(
+        self, state: TrainState, batch, key: chex.PRNGKey
+    ) -> tuple[TrainState, dict]:
         pairs, grid_shapes = batch
-        
-        # Capture all gradients if logging is enabled
-        if self.log_gradients and self.num_steps % self.log_gradients_every == 0:
-            def loss_fn(params):
-                loss, metrics = state.apply_fn(
-                    {"params": params},
-                    pairs,
-                    grid_shapes,
-                    dropout_eval=False,
-                    prior_kl_coeff=self.prior_kl_coeff,
-                    pairwise_kl_coeff=self.pairwise_kl_coeff,
-                    matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
-                    matrix_size_cols=self.model.decoder.config.matrix_size_cols,
-                    mode=self.train_inference_mode,
-                    rngs=key,
-                    **self.train_inference_kwargs,
-                )
-                return loss, metrics
-            
-            (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
-            
-            # Record detailed gradient information
-            grad_metrics = {
-                "grad_norm_total": optax.global_norm(grads),
-                "grad_norm_encoder": optax.global_norm(grads["encoder"]),
-                "grad_norm_decoder": optax.global_norm(grads["decoder"])
-            }
-            
-            # Record gradient norms for specific layers
-            grad_metrics.update({
-                f"grad_norm_encoder_layer_{i}": optax.global_norm(layer_grads)
-                for i, layer_grads in enumerate(jax.tree_util.tree_leaves(grads["encoder"]["transformer"]))
-                if hasattr(layer_grads, "shape")
-            })
-            
-            grad_metrics.update({
-                f"grad_norm_decoder_layer_{i}": optax.global_norm(layer_grads)
-                for i, layer_grads in enumerate(jax.tree_util.tree_leaves(grads["decoder"]["transformer"]))
-                if hasattr(layer_grads, "shape")
-            })
-            
-            # Add gradient information to metrics
-            metrics.update(grad_metrics)
-            
-            # Optionally save a visualization
-            if self.log_gradients == "detailed":
-                from src.visualize_grads import visualize_training_gradients
-                fig = visualize_training_gradients(grads, self.num_steps)
-                metrics["gradient_flow_fig"] = fig
-        else:
-            # Standard gradient computation without extra logging
-            grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
-                {"params": state.params},
-                pairs,
-                grid_shapes,
-                dropout_eval=False,
-                prior_kl_coeff=self.prior_kl_coeff,
-                pairwise_kl_coeff=self.pairwise_kl_coeff,
-                matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
-                matrix_size_cols=self.model.decoder.config.matrix_size_cols,
-                mode=self.train_inference_mode,
-                rngs=key,
-                **self.train_inference_kwargs,
-            )
-        
-        # Rest of the existing method continues...
+        grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
+            {"params": state.params},
+            pairs,
+            grid_shapes,
+            dropout_eval=False,
+            prior_kl_coeff=self.prior_kl_coeff,
+            pairwise_kl_coeff=self.pairwise_kl_coeff,
+            matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
+            matrix_size_cols=self.model.decoder.config.matrix_size_cols,
+            mode=self.train_inference_mode,
+            rngs=key,
+            **self.train_inference_kwargs,
+        )
         grads = grads["params"]
         grads = jax.lax.pmean(grads, axis_name="devices")
         state = state.apply_gradients(grads=grads)
         metrics.update(grad_norm=optax.global_norm(grads))
         return state, metrics
 
-    def train_n_steps(self, state, next_batch, key, n_steps=1):
-        for i in range(n_steps):
-            key, step_key = jax.random.split(key)
-            state, metrics = self.train_one_step(state, next(next_batch), step_key)
-            self.num_steps += 1
-            
-            # Save gradient visualization if available
-            if 'gradient_flow_fig' in metrics:
-                wandb.log({"gradient_flow": wandb.Image(metrics.pop('gradient_flow_fig'))}, step=self.num_steps)
-            
-            # Log all other metrics
-            metrics = tree_map(jnp.mean, metrics)
-            wandb.log(metrics, step=self.num_steps)
-        
-        return state, key
+    def train_n_steps(
+        self, state: TrainState, batches, key: chex.PRNGKey
+    ) -> tuple[TrainState, dict]:
+        num_devices, num_steps = batches[0].shape[0:2]
+        keys = jax.random.split(key, (num_devices, num_steps))
+        state, metrics = self.pmap_train_steps(state, batches, keys)
+        # Mean the metrics over the devices and the n mini-batches
+        metrics = tree_map(jnp.mean, metrics)
+        return state, metrics
 
     @partial(jax.jit, static_argnames=("self", "log_every_n_steps"), backend="cpu")
     def prepare_train_dataset_for_epoch(
