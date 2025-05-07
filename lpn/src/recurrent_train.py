@@ -19,6 +19,8 @@ from tqdm.auto import trange as tqdm_trange
 import wandb
 import hydra
 import omegaconf
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 from src.models.recurrent_lpn import LPN
@@ -340,9 +342,30 @@ class Trainer:
         optimizer = optax.MultiSteps(optimizer, every_k_schedule=self.gradient_accumulation_steps)
         return TrainState.create(apply_fn=self.model.apply, tx=optimizer, params=variables["params"])
 
-    def train_one_step(
-        self, state: TrainState, batch, key: chex.PRNGKey
-    ) -> tuple[TrainState, dict]:
+    # def train_one_step(
+    #     self, state: TrainState, batch, key: chex.PRNGKey
+    # ) -> tuple[TrainState, dict]:
+    #     pairs, grid_shapes = batch
+    #     grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
+    #         {"params": state.params},
+    #         pairs,
+    #         grid_shapes,
+    #         dropout_eval=False,
+    #         prior_kl_coeff=self.prior_kl_coeff,
+    #         pairwise_kl_coeff=self.pairwise_kl_coeff,
+    #         matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
+    #         matrix_size_cols=self.model.decoder.config.matrix_size_cols,
+    #         mode=self.train_inference_mode,
+    #         rngs=key,
+    #         **self.train_inference_kwargs,
+    #     )
+    #     grads = grads["params"]
+    #     grads = jax.lax.pmean(grads, axis_name="devices")
+    #     state = state.apply_gradients(grads=grads)
+    #     metrics.update(grad_norm=optax.global_norm(grads))
+    #     return state, metrics
+    
+    def train_one_step(self, state: TrainState, batch, key: chex.PRNGKey) -> tuple[TrainState, dict]:
         pairs, grid_shapes = batch
         grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
             {"params": state.params},
@@ -357,18 +380,50 @@ class Trainer:
             rngs=key,
             **self.train_inference_kwargs,
         )
+        
+        # Store the original gradients for visualization
+        orig_grads = jax.tree_map(lambda x: x, grads["params"])
+        
         grads = grads["params"]
         grads = jax.lax.pmean(grads, axis_name="devices")
         state = state.apply_gradients(grads=grads)
         metrics.update(grad_norm=optax.global_norm(grads))
+        
+        # Add the original gradients to metrics for later use
+        metrics["orig_grads"] = orig_grads
+    
         return state, metrics
 
-    def train_n_steps(
-        self, state: TrainState, batches, key: chex.PRNGKey
-    ) -> tuple[TrainState, dict]:
+    # def train_n_steps(
+    #     self, state: TrainState, batches, key: chex.PRNGKey
+    # ) -> tuple[TrainState, dict]:
+    #     num_devices, num_steps = batches[0].shape[0:2]
+    #     keys = jax.random.split(key, (num_devices, num_steps))
+    #     state, metrics = self.pmap_train_steps(state, batches, keys)
+    #     # Mean the metrics over the devices and the n mini-batches
+    #     metrics = tree_map(jnp.mean, metrics)
+    #     return state, metrics
+    def train_n_steps(self, state: TrainState, batches, key: chex.PRNGKey) -> tuple[TrainState, dict]:
         num_devices, num_steps = batches[0].shape[0:2]
         keys = jax.random.split(key, (num_devices, num_steps))
         state, metrics = self.pmap_train_steps(state, batches, keys)
+        
+        # Save original gradients from the first device for visualization
+        if "orig_grads" in metrics:
+            device_grads = jax.tree_map(
+                lambda x: x[0] if hasattr(x, 'shape') and len(x.shape) > 0 else x, 
+                metrics.pop("orig_grads")
+            )
+            
+            # Check if we should log gradient flow
+            log_gradients = getattr(self.cfg.training, "log_gradients", False)
+            log_every = getattr(self.cfg.training, "log_gradients_every", 100)
+            
+            if log_gradients and self.num_steps % log_every == 0:
+                # Visualize gradients
+                fig = self.visualize_gradient_flow(device_grads, self.num_steps)
+                metrics["gradient_flow_fig"] = fig
+        
         # Mean the metrics over the devices and the n mini-batches
         metrics = tree_map(jnp.mean, metrics)
         return state, metrics
@@ -641,6 +696,11 @@ class Trainer:
             metrics.update(
                 {"timing/train_time": end - start, "timing/train_num_samples_per_second": throughput}
             )
+            if 'gradient_flow_fig' in metrics:
+                wandb.log(
+                    {"gradient_flow": wandb.Image(metrics.pop('gradient_flow_fig'))}, 
+                    step=self.num_steps
+                )
             wandb.log(metrics, step=self.num_steps)
 
             # Save checkpoint
@@ -800,6 +860,44 @@ class Trainer:
             .replace("+", "_")
             .replace("=", "_")
         )
+    
+    def visualize_gradient_flow(self, grads, step):
+        """Visualize gradients and save the figure.
+        
+        Args:
+            grads: The gradients dictionary
+            step: The current training step
+        
+        Returns:
+            A matplotlib figure object
+        """
+        
+        # Flatten the gradient structure
+        flat_grads = []
+        layer_names = []
+        
+        def extract_grads(g, name):
+            if isinstance(g, dict):
+                for k, v in g.items():
+                    extract_grads(v, f"{name}/{k}")
+            elif hasattr(g, 'shape'):
+                flat_grads.append(np.abs(np.array(g)).mean())
+                layer_names.append(name)
+        
+        extract_grads(grads, "")
+        
+        # Plot gradients
+        plt.figure(figsize=(12, 8))
+        plt.barh(range(len(flat_grads)), flat_grads, align='center')
+        plt.yticks(range(len(flat_grads)), layer_names)
+        plt.xlabel('Average Gradient Magnitude')
+        plt.title(f'Gradient Flow at Step {step}')
+        plt.grid(True)
+        plt.tight_layout()
+        os.makedirs('flows', exist_ok=True)
+        plt.savefig(f'flows/gradient_flow_step_{step}.png')
+        
+        return plt.gcf()
 
 
 def instantiate_config_for_mpt(

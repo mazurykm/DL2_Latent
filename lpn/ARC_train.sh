@@ -20,5 +20,7 @@ export HOME=/gpfs/home5/scur2570
 export PYTHONPATH=${PYTHONPATH}:${PWD}
 
 
-#python src/train.py --config-name arc_train
-python src/recurrent_train.py --config-name arc_train
+python src/recurrent_train.py --config-name arc_train \
+  +training.log_gradients=true \
+  +training.log_gradients_every=100 
+
