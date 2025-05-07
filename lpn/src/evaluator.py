@@ -133,7 +133,7 @@ class Evaluator:
 
                         # Crop input to predicted shape
                         print(f"input_grid: {input_grid.shape}, grid_shape: {grid_shape}")
-                        num_rows, num_cols = grid_shape[0], grid_shape[1]
+                        num_rows, num_cols = grid_shape[0]
                         cropped = input_grid[:num_rows, :num_cols].tolist()
 
                         intermediate_attempts[f"step_{t}"] = cropped
