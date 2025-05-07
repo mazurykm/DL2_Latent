@@ -95,7 +95,7 @@ class Evaluator:
                     (pairs[None], grid_shapes[None], input[None], input_grid_shape[None], sub_key),
                     self.devices[:1],
                 )
-                *outputs, _ = self.pmap_generate_output(
+                *outputs, _, intermediate_dict = self.pmap_generate_output(
                     {"params": single_device_params},
                     b_pairs,
                     b_grid_shapes,
@@ -107,6 +107,35 @@ class Evaluator:
                 first_output_grid, first_output_grid_shape, second_output_grid, second_output_grid_shape = (
                     jax.tree_util.tree_map(lambda x: x[0, 0], outputs)
                 )
+                # The same for dict
+                if intermediate_dict is not None:
+                    # Step 1: Move the entire dict from device to host
+                    intermediate_dict_host = jax.device_get(intermediate_dict)
+
+                    # Step 2: Remove batch and device dims per step
+                    # This assumes shape: {t: {"input": (1, 1, ...), "shape": (1, 1, ...)}}
+                    def squeeze_dict_entry(entry):
+                        return {
+                            "input": entry["input"][0, 0],    # Remove batch/device
+                            "shape": entry["shape"][0, 0],    # Remove batch/device
+                        }
+
+                    intermediate_dict_host = {
+                        t: squeeze_dict_entry(step_dict) for t, step_dict in intermediate_dict_host.items()
+                    }
+
+                    # Step 3: Build list of intermediate cropped inputs
+                    intermediate_attempts = {}
+                    for t, step_data in intermediate_dict_host.items():
+                        input_grid = step_data["input"]
+                        grid_shape = step_data["shape"]
+
+                        # Crop input to predicted shape
+                        num_rows, num_cols = int(grid_shape[0]), int(grid_shape[1])
+                        cropped = input_grid[:num_rows, :num_cols].tolist()
+
+                        intermediate_attempts[f"step_{t}"] = cropped
+
 
                 # Crop the output to the predicted shape
                 first_num_rows, first_num_cols = first_output_grid_shape
@@ -114,6 +143,7 @@ class Evaluator:
                 attempts = {
                     "attempt_1": first_output_grid[:first_num_rows, :first_num_cols].tolist(),
                     "attempt_2": second_output_grid[:second_num_rows, :second_num_cols].tolist(),
+                    "intermediate_attempts": intermediate_attempt
                 }
                 task_outputs.append(attempts)
             results[task_id] = task_outputs

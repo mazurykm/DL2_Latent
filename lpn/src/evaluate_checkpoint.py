@@ -286,7 +286,7 @@ def build_generate_output_batch_to_be_pmapped(
     ) -> dict[str, chex.Array]:
         grids_inputs, labels_grids_outputs = dataset_grids[..., 0], dataset_grids[..., 1]
         shapes_inputs, labels_shapes_outputs = dataset_shapes[..., 0], dataset_shapes[..., 1]
-        generated_grids_outputs, generated_shapes_outputs, _ = model.apply(
+        generated_grids_outputs, generated_shapes_outputs, _, _ = model.apply(
             {"params": params},
             leave_one_out_grids,
             leave_one_out_shapes,
