@@ -216,13 +216,11 @@ from tqdm import trange
 from flax.training.train_state import TrainState
 from flax.serialization import from_bytes
 
-from src.models.recurrent_lpn import LPN
+from src.models.lpn import LPN
 from src.evaluator import Evaluator
 from src.models.transformer import EncoderTransformer, DecoderTransformer
-from src.recurrent_train import Trainer, load_datasets, instantiate_config_for_mpt
+from src.train import Trainer, load_datasets, instantiate_config_for_mpt
 from src.data_utils import make_leave_one_out, DATASETS_BASE_PATH
-import os
-from datetime import datetime
 
 
 def instantiate_model(cfg: omegaconf.DictConfig, mixed_precision: bool) -> LPN:
@@ -252,8 +250,7 @@ def instantiate_train_state(lpn: LPN) -> TrainState:
         maxval=min(decoder.config.max_rows, decoder.config.max_cols) + 1,
     )
     variables = lpn.init(
-        key, grids, shapes, dropout_eval=False, prior_kl_coeff=0.0, pairwise_kl_coeff=0.0, mode="mean", matrix_size_rows=decoder.config.matrix_size_rows,
-                matrix_size_cols=decoder.config.matrix_size_cols,
+        key, grids, shapes, dropout_eval=False, prior_kl_coeff=0.0, pairwise_kl_coeff=0.0, mode="mean"
     )
 
     learning_rate, linear_warmup_steps = 0, 0
@@ -288,7 +285,7 @@ def build_generate_output_batch_to_be_pmapped(
     ) -> dict[str, chex.Array]:
         grids_inputs, labels_grids_outputs = dataset_grids[..., 0], dataset_grids[..., 1]
         shapes_inputs, labels_shapes_outputs = dataset_shapes[..., 0], dataset_shapes[..., 1]
-        generated_grids_outputs, generated_shapes_outputs, _, _ = model.apply(
+        generated_grids_outputs, generated_shapes_outputs, _ = model.apply(
             {"params": params},
             leave_one_out_grids,
             leave_one_out_shapes,
@@ -350,19 +347,10 @@ def evaluate_json(
         key=jax.random.PRNGKey(random_search_seed),
         only_n_tasks=only_n_tasks,  # 'None' to run on all tasks
         progress_bar=True,
-        num_tasks_to_show=0, #change this to produce a plot 
+        num_tasks_to_show=0,
     )
     metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
     metrics["fig"] = fig
-
-    # Save plt.Figure to a hardcoded folder "intermediate_outputs" with a timestamp in the name
-    output_dir = "intermediate_outputs"
-    os.makedirs(output_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fig_path = os.path.join(output_dir, f"evaluation_plot_{timestamp}.png")
-    fig.savefig(fig_path)
-    print(f"Figure saved as {fig_path}")
-
     return metrics
 
 
@@ -727,16 +715,6 @@ if __name__ == "__main__":
         default=True,
         help="Whether to use mixed precision for inference.",
     )
-
-    ## New argument
-    parser.add_argument(
-        "--save-intermediate-outputs",
-        type=true_or_false_from_arg,
-        required=False,
-        default=False,
-        help="Whether to save intermediate outputs during inference.",
-    )
-
     args = parser.parse_args()
     if (
         args.json_challenges_file is None
@@ -749,7 +727,7 @@ if __name__ == "__main__":
         parser.error(
             "Must provide either the json challenges (-jc) and solutions (-js) files or the dataset folder (-d)."
         )
-    if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent", "matrix"]:
+    if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent"]:
         parser.error(
             "Invalid inference mode. Choose from ['mean', 'first', 'random_search', 'gradient_ascent']."
         )
@@ -783,7 +761,6 @@ if __name__ == "__main__":
         "scan_gradients_latents",
         "accumulate_gradients_decoder_pairs",
         "random_perturbation",
-        "save_intermediate_outputs",
     ]:
         if getattr(args, arg) is not None:
             inference_mode_kwargs[arg] = getattr(args, arg)

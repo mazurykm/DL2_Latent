@@ -770,26 +770,7 @@ class Trainer:
     def load_checkpoint(cls, checkpoint_path: str, state: TrainState) -> TrainState:
         artifact = wandb.use_artifact(checkpoint_path)
         artifact_dir = artifact.download()
-
-        # Create a safe path without colons for the state.msgpack file
-        state_file = os.path.join(artifact_dir, "state.msgpack")
-
-        # On Windows, replace colons in the path with underscores
-        if os.name == 'nt' and ':' in state_file:
-            safe_dir = artifact_dir.replace(':', '-')
-            safe_file = os.path.join(safe_dir, "state.msgpack")
-
-            # Make sure the directory exists
-            os.makedirs(os.path.dirname(safe_file), exist_ok=True)
-
-            # Copy the file to the safe location if needed
-            if not os.path.exists(safe_file):
-                import shutil
-                shutil.copy2(state_file, safe_file)
-
-            state_file = safe_file
-
-        with open(state_file, "rb") as data_file:
+        with open(os.path.join(artifact_dir, "state.msgpack"), "rb") as data_file:
             byte_data = data_file.read()
         state = from_bytes(state, byte_data)
         # Get the number of steps from the checkpoint alias

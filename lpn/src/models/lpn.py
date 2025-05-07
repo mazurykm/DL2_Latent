@@ -24,14 +24,13 @@ class LPN(nn.Module):
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
-        mode: Literal["mean", "all", "random_search", "gradient_ascent", "ant_colony", "sum", "matrix"],
+        mode: Literal["mean", "all", "random_search", "gradient_ascent"],
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
         **mode_kwargs,
     ):
         """
-        Forward pass of the LPN
-         model.
+        Forward pass of the LPN model.
 
         Args:
             pairs: input data as tokens. Shape (*B, N, R, C, 2).
@@ -43,7 +42,7 @@ class LPN(nn.Module):
                 represents (rows, columns) of two channels, e.g. [[R_input, R_output], [C_input, C_output]].
                 Expects grid shapes values to be in [1, max_rows] and [1, max_cols].
             dropout_eval: if false dropout is applied otherwise it is not.
-            mode: mode of the forward pass. Can be "mean", "all", "random_search", "gradient_ascent", "ant_colony", "sum", or "matrix".
+            mode: mode of the forward pass. Can be "mean" or "all".
                 - "mean": decodes the output using the mean latent of all the other pairs.
                 - "all": decodes the output N-1 times, each time using a different latent from the other
                     pairs.
@@ -51,9 +50,6 @@ class LPN(nn.Module):
                     and then decodes the output using that latent.
                 - "gradient_ascent": uses gradient ascent to find the latent that best explains the
                     (input, output) pairs and then decodes the output using that latent
-                - "ant_colony": uses Ant Colony Optimization to find the best latent for each pair.
-                - "sum": sums up the latent vectors instead of averaging them.
-                - "matrix": treats latent vectors as matrices and uses matrix multiplication for composition.
             prior_kl_coeff: KL divergence coefficient for the variational inference. Required when using
                 variational inference.
             pairwise_kl_coeff: KL divergence coefficient for the pairwise KL divergence. Optional.
@@ -84,24 +80,23 @@ class LPN(nn.Module):
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
-        elif mode == "sum":
-            # Compute the context vector by summing all but one latents.
-            context = leave_one_out_latents.sum(axis=-2)  # (*B, N, H)
-            # Compute the loss for each pair using the sum of all but one latents. Shape (*B, N).
+
+        elif mode == "cross_attention":
+            test_input = pairs[..., -1:, :, :, :] 
+            test_shape = grid_shapes[..., -1:, :, :] 
+            support_latents = latents[..., :-1, :] 
+
+            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)  
+            query = test_latent[..., None, :]  
+            keys = support_latents 
+            values = support_latents
+            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
+            context = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
+
+            context = jnp.tile(context[:, None, :], (1, pairs.shape[1], 1))  
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
-        elif mode == "matrix":
-            # Reshape latents into matrices and use matrix multiplication
-            #latent_dim = leave_one_out_latents.shape[-1]
-            #matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
-            #context = self._compute_matrix_context(leave_one_out_latents, matrix_size)
-            context = self._compute_cross_attention_context(
-                leave_one_out_latents, 
-                matrix_size_rows=matrix_size_rows, 
-                matrix_size_cols=matrix_size_cols
-            )
-            # context should be (*B, N, H)
-            # Compute loss and metrics
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+
         elif mode == "all":
             # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
             loss, metrics = jax.vmap(
@@ -138,20 +133,6 @@ class LPN(nn.Module):
                 leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
             )  # (*B, N, H)
             # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
-        elif mode == "ant_colony":
-            raise NotImplementedError("Ant colony optimization is not working yet.")
-            for arg in ["num_ants", "num_iterations"]:
-                assert arg in mode_kwargs, f"'{arg}' argument required for 'ant_colony' training mode."
-            key = self.make_rng("ant_colony")
-            # Repeat all the pairs and grid shapes except the one to leave out.
-            leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
-            leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
-            # Get the best context for each pair using ant colony optimization.
-            context, _ = self._get_ant_colony_context(
-                leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
-            )  # (*B, N, H)
-            # Compute the loss for each pair using the context from the ant colony. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         else:
             raise ValueError(f"Unsupported mode: {mode}")
@@ -327,7 +308,7 @@ class LPN(nn.Module):
         input_grid_shape: chex.Array,
         key: Optional[chex.PRNGKey],
         dropout_eval: bool,
-        mode: Literal["mean", "first", "random_search", "gradient_ascent", "sum", "matrix"],
+        mode: Literal["mean", "first", "random_search", "gradient_ascent", "cross_attention"],
         return_two_best: bool = False,
         **mode_kwargs,
     ):
@@ -351,7 +332,7 @@ class LPN(nn.Module):
                 "gradient_ascent" mode when using random_perturbations, and in variational inference. None
                 or shape (*B, 2). If None, the key is not used.
             dropout_eval: if false dropout is applied otherwise it is not.
-            mode: mode of the forward pass. Can be "mean", "first", "random_search", "gradient_ascent", "sum", or "matrix".
+            mode: mode of the forward pass. Can be "mean", "first", or "random_search".
                 - "mean": decodes the output using the mean latent from the (input, output) pairs.
                 - "first": decodes the output using the first latent.
                 - "random_search": randomly search for a latent that best explains the (input, output) pairs
@@ -368,8 +349,6 @@ class LPN(nn.Module):
                     'include_mean_latent' (default to True) and 'include_all_latents' (default to False).
                     Computes gradient ascent on decoder likelihood for 'num_steps' steps with learning rate
                     'lr'.
-                - "sum": sums up the latent vectors instead of averaging them.
-                - "matrix": treats latent vectors as matrices and uses matrix multiplication for composition.
             return_two_best: if true returns the two best predictions, otherwise returns the best prediction.
             mode_kwargs: additional keyword arguments for the inference mode (e.g. 'remove_encoder_latents').
 
@@ -397,15 +376,20 @@ class LPN(nn.Module):
         if mode == "mean":
             context = latents.mean(axis=-2)
             first_context, second_context = context, context
-        elif mode == "sum":
-            context = latents.sum(axis=-2)
+        elif mode == "cross_attention":
+            test_input = input[..., None, :, :]          
+            test_shape = input_grid_shape[..., None, :] 
+            test_latent = self.encoder(test_input, test_shape[..., None, :], dropout_eval)[0].squeeze(-2) 
+            query = test_latent[..., None, :] 
+            keys = latents[..., :-1, :]       
+            values = keys
+    
+            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
+            context = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
+    
             first_context, second_context = context, context
-        elif mode == "matrix":
-            # Reshape latents into matrices and use matrix multiplication
-            latent_dim = latents.shape[-1]
-            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
-            context = self._compute_matrix_context(latents, matrix_size)
-            first_context, second_context = context, context
+
         elif mode == "first":
             context = latents[..., 0, :]
             first_context, second_context = context, context
@@ -947,171 +931,6 @@ class LPN(nn.Module):
             last_non_padded_logits.append(end_of_row_logits)
         return jnp.concatenate(last_non_padded_logits, axis=-2)
 
-    def _get_ant_colony_context(
-        self,
-        latents: chex.Array,
-        pairs: chex.Array,
-        grid_shapes: chex.Array,
-        key: chex.PRNGKey,
-        num_ants: int = 10,
-        num_iterations: int = 50,
-        evaporation_rate: float = 0.1,
-        alpha: float = 1.0,  # pheromone importance
-        beta: float = 2.0,   # heuristic importance
-        initial_pheromone: float = 1.0,
-        include_mean_latent: bool = True,
-        include_all_latents: bool = False,
-        **kwargs,
-    ):
-        """Returns the best context using Ant Colony Optimization in the latent space."""
-        # Prepare initial latents
-        initial_latents = self._prepare_latents_before_search(
-            include_mean_latent, include_all_latents, latents
-        )
-        
-        # Flatten input/output for decoding likelihood
-        input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
-        
-        def compute_heuristic(latent: chex.Array) -> chex.Array:
-            """Compute heuristic value (log probability) for a given latent."""
-            # Reshape latent to match expected shape for decoder
-            # We need to match the batch and sequence dimensions of input_seq/output_seq
-            latent = latent.reshape(1, 1, 1, -1)  # (1, 1, 1, 256)
-            # Repeat to match the sequence length dimension
-            latent = latent.repeat(input_seq.shape[1], axis=1)  # (1, 4, 1, 256)
-            # Repeat to match the number of pairs dimension
-            latent = latent.repeat(input_seq.shape[2], axis=2)  # (1, 4, 3, 256)
-            
-            row_logits, col_logits, grid_logits = self.decoder(
-                input_seq, output_seq, latent, dropout_eval=True
-            )
-            return self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq)
-        
-        # Initialize pheromone matrix
-        pheromone = jnp.ones(initial_latents.shape[:-1]) * initial_pheromone
-        
-        # Compute initial heuristic values
-        def compute_heuristic_batch(latent_batch):
-            # latent_batch: (num_latents, latent_dim)
-            results = []
-            for i in range(latent_batch.shape[0]):
-                results.append(compute_heuristic(latent_batch[i]))
-            return jnp.stack(results)
-        
-        heuristic_values = compute_heuristic_batch(initial_latents)
-        
-        def select_next_point(current_point, pheromone, heuristic, key):
-            """Select next point based on pheromone and heuristic values."""
-            probabilities = (pheromone ** alpha) * (heuristic ** beta)
-            probabilities = probabilities / (jnp.sum(probabilities) + 1e-10)
-            # Ensure probabilities is 1D
-            probabilities = probabilities.flatten()
-            assert probabilities.ndim == 1, f"probabilities must be 1D, got {probabilities.shape}"
-            next_point_idx = jax.random.categorical(key, probabilities)
-            # Ensure we return a scalar
-            return jnp.squeeze(next_point_idx)
-        
-        def ant_step(carry, _):
-            current_point, pheromone, key = carry
-            key, subkey = jax.random.split(key)
-            next_point = select_next_point(current_point, pheromone, heuristic_values, subkey)
-            # Ensure next_point is a scalar
-            next_point = jnp.array(next_point, dtype=jnp.int32)
-            return (next_point, pheromone, key), next_point
-        
-        def colony_step(carry, _):
-            pheromone, key = carry
-            key, subkey = jax.random.split(key)
-            
-            # Generate paths for all ants
-            start_points = jax.random.randint(subkey, (num_ants,), 0, initial_latents.shape[0])
-            
-            def ant_path(start_point, key):
-                # Initialize carry with proper shape and type
-                init_point = jnp.array(start_point, dtype=jnp.int32)
-                init_carry = (init_point, pheromone, key)
-                
-                def scan_step(carry, _):
-                    return ant_step(carry, None)
-                
-                (final_point, _, _), path = jax.lax.scan(
-                    scan_step, init_carry, None, length=num_iterations
-                )
-                return path, final_point
-            
-            paths, final_points = jax.vmap(ant_path)(start_points, jax.random.split(key, num_ants))
-            
-            # Update pheromone
-            pheromone = (1 - evaporation_rate) * pheromone
-            path_values = compute_heuristic_batch(initial_latents[final_points])
-            pheromone = pheromone.at[final_points].add(path_values)
-            
-            return (pheromone, key), (paths, path_values)
-        
-        # Run ACO iterations
-        (final_pheromone, _), (all_paths, all_values) = jax.lax.scan(
-            colony_step, (pheromone, key), None, length=num_iterations
-        )
-        
-        # Find best paths
-        best_path_idx = jnp.argmax(all_values)
-        best_path = all_paths[best_path_idx]
-        second_best_path_idx = jnp.argmax(
-            jnp.where(jnp.arange(len(all_values)) != best_path_idx, all_values, -jnp.inf)
-        )
-        second_best_path = all_paths[second_best_path_idx]
-        
-        # Convert paths to latents
-        best_context = initial_latents[best_path[-1]]
-        second_best_context = initial_latents[second_best_path[-1]]
-        
-        return best_context, second_best_context
-
-    def _compute_matrix_context(self, latents, matrix_size):
-        """Helper function to compute matrix context."""
-        # latents is (1,4,3,64)
-        batch_shape = latents.shape[:-1]
-        latent_dim = latents.shape[-1]
-        
-        # Convert matrix_size to a concrete value
-        # matrix_size_int = matrix_size.astype(jnp.int32)
-        
-        # make a (1,4,3,8,8)
-        static_shape = (*batch_shape, 8, 8)
-        latents_reshaped = latents.reshape(static_shape)
-        
-        # Initialize context with the first matrix
-        context = latents_reshaped[..., 0, :, :]
-        
-        # Perform matrix multiplication for each subsequent matrix
-        for i in range(1, latents_reshaped.shape[-3]):
-            context = jnp.matmul(context, latents_reshaped[..., i, :, :])
-        
-        # make a (1,4,64)
-        context = context.reshape(*context.shape[:-2], -1)
-        return context
-
-        def _compute_cross_attention_context(self, latents: chex.Array, matrix_size_rows: int, matrix_size_cols: int) -> chex.Array:
-            """Cross-attend across N-1 latents for each pair separately."""
-            rint("\n[DEBUG] >>> _compute_cross_attention_context() called.")
-            print(f"[DEBUG] Latents shape BEFORE reshape: {latents.shape}")  
-
-            batch_size, num_pairs, num_others, latent_dim = latents.shape
-            assert latent_dim == matrix_size_rows * matrix_size_cols, f"latent_dim={latent_dim}, expected {matrix_size_rows}*{matrix_size_cols}"
-
-            query = latents.mean(axis=-2, keepdims=True)   # (B, N, 1, H)
-            key = latents                                   # (B, N, N-1, H)
-            value = latents                                 # (B, N, N-1, H)
-
-            attn_scores = jnp.einsum('bnqh,bnkh->bnqk', query, key) / jnp.sqrt(latent_dim)  # (B, N, 1, N-1)
-            attn_weights = jax.nn.softmax(attn_scores, axis=-1)                             # (B, N, 1, N-1)
-
-            attended = jnp.einsum('bnqk,bnkh->bnqh', attn_weights, value)                   # (B, N, 1, H)
-            attended = attended.squeeze(axis=2)                                             # (B, N, H)
-
-            print(f"[DEBUG] Attended context shape AFTER attention: {attended.shape}")
-
-            return attended
 
 if __name__ == "__main__":
     from src.models.utils import TransformerLayerConfig
