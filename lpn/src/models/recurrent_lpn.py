@@ -16,7 +16,6 @@ import numpy as np
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.models.utils import EncoderTransformerConfig, DecoderTransformerConfig
 from src.data_utils import make_leave_one_out
-from src.visualization import display_grid  # Make sure this is properly imported
 
 
 class LPN(nn.Module):
@@ -293,13 +292,13 @@ class LPN(nn.Module):
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
         # Decode the output sequence (teacher forcing).
-        print(f"context: {context.shape}")
+
         context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
             matrix_size_cols=matrix_size_cols,
             latents=context,
         )
-        print(f"context_matrix: {context_matrix.shape}")
+
         # initial input 
         current_input = input_seq
         final_row_logits, final_col_logits, final_grid_logits = None, None, None
@@ -313,13 +312,28 @@ class LPN(nn.Module):
             
             if t < matrix_size_cols - 1:
        
-                row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
+                # row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
+                #     context_col, current_input, current_input, dropout_eval
+                # )
+                # predicted_rows = jnp.argmax(row_logits, axis=-1) + 1
+                # predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
+                # predicted_tokens = jnp.argmax(grid_logits, axis=-1)
+                # current_input = jnp.concatenate([predicted_rows[..., None], predicted_cols[..., None], predicted_tokens], axis=-1)
+                _, _, grid_logits, _ = self._generate_logits_from_context(
                     context_col, current_input, current_input, dropout_eval
                 )
-                predicted_rows = jnp.argmax(row_logits, axis=-1) + 1
-                predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
+                
                 predicted_tokens = jnp.argmax(grid_logits, axis=-1)
-                current_input = jnp.concatenate([predicted_rows[..., None], predicted_cols[..., None], predicted_tokens], axis=-1)
+                #prev version
+                current_input = jnp.concatenate([grid_shapes[..., 0], predicted_tokens], axis=-1)
+
+                # #current version, adding the predicted tokens to the current input
+                # current_input = current_input.at[..., 2].add(predicted_tokens)
+                # # Clip to valid token range
+                # vocab_size = self.decoder.config.vocab_size
+                # updated_tokens = jnp.clip(current_input[..., 2], a_min=0, a_max=vocab_size - 1)
+                # current_input = current_input.at[..., 2].set(updated_tokens)
+
             else:
 
                 row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
@@ -328,31 +342,7 @@ class LPN(nn.Module):
                 final_row_logits = row_logits
                 final_col_logits = col_logits
                 final_grid_logits = grid_logits
-            # Get logits
-            #row_logits, col_logits, grid_logits, current_input = self._generate_logits_from_context(
-             #   context_col, current_input, output_seq, dropout_eval
-            #)
-            #if t == matrix_size_cols - 1:
-             #   final_row_logits = row_logits
-              #  final_col_logits = col_logits
-               # final_grid_logits = grid_logits
-            # Decode
-            #row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
-
-            # # Predict new shape
-            # predicted_rows = jnp.argmax(row_logits, axis=-1) + 1  # because original shapes are [1, max_rows]
-            # predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
-
-            # # Predict new tokens
-            # predicted_tokens = jnp.argmax(grid_logits, axis=-1)  # (B, R*C)
-
-            # # Prepare new input for next step
-            # predicted_grid_shape_tokens = jnp.stack([predicted_rows, predicted_cols], axis=-1)  # (B, 2)
-            # current_input = jnp.concatenate([predicted_grid_shape_tokens, predicted_tokens], axis=-1)
-            
-
-        #row_logits, col_logits, grid_logits = self.decoder(input_seq, output_seq, context, dropout_eval)
-
+           
         # Compute cross entropy losses.
         grid_shapes_row, grid_shapes_col = grid_shapes[..., 0, 1], grid_shapes[..., 1, 1]
         # -1 to shift the tokens to [0, max_rows-1]
@@ -530,7 +520,7 @@ class LPN(nn.Module):
         info = {"context": first_context}
 
         if return_two_best:
-            output_grids, output_shapes = jax.vmap(
+            output_grids, output_shapes, intermediate_dict = jax.vmap(
                 partial(
                     self._generate_output_from_context_v2,
                     input=input,
@@ -543,13 +533,13 @@ class LPN(nn.Module):
             )(jnp.stack([first_context, second_context], axis=0))
             first_output_grids, second_output_grids = output_grids[0], output_grids[1]
             first_output_shapes, second_output_shapes = output_shapes[0], output_shapes[1]
-            return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info
+            return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info, intermediate_dict
         else:
-            output_grids, output_shapes = self._generate_output_from_context_v2(
+            output_grids, output_shapes, intermediate_dict = self._generate_output_from_context_v2(
                 first_context, input, input_grid_shape, dropout_eval, matrix_size_rows, matrix_size_cols, mode_kwargs.get("save_intermediate_outputs", False)
 
             )
-            return output_grids, output_shapes, info
+            return output_grids, output_shapes, info, intermediate_dict
 
     def _generate_logits_from_context(
         self,
@@ -593,7 +583,6 @@ class LPN(nn.Module):
         matrix_size_rows: int,
         matrix_size_cols: int,
         save_intermediate: bool = False,
-        save_dir: str = "intermediate_outputs",  # where to save if enabled
     ) -> tuple[chex.Array, chex.Array]:
         """
         Recurrently generates output grids using per-column context, without ground-truth output_seq (generation mode).
@@ -610,8 +599,6 @@ class LPN(nn.Module):
             final_output_grids: predicted output grids, shape (B, R, C)
             final_output_shapes: predicted shapes, shape (B, 2)
         """
-        if save_intermediate:
-            os.makedirs(save_dir, exist_ok=True)
 
         # Convert context vector into matrix (B, H, matrix_size_rows, matrix_size_cols)
         context_matrix = self._convert_to_matrix(
@@ -623,6 +610,7 @@ class LPN(nn.Module):
         # Initialize
         current_input = input
         current_shape = input_grid_shape
+        intermediate_outputs = {}
 
         for t in range(matrix_size_cols):
             context_col = context_matrix[..., t]   # (B, H, matrix_size_rows)
@@ -678,27 +666,22 @@ class LPN(nn.Module):
 
             # Update current input for next step
             current_input = jnp.reshape(output_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
-            current_shape = output_shapes
-
+            #I change shape only for final step
+            if t >= matrix_size_cols - 1:
+                current_shape = output_shapes
+            
+            # Optionally save intermediate outputs
             if save_intermediate:
-                unique_run_id = str(uuid.uuid4())[:8]  # Unique ID to avoid overwriting
-                for b in range(current_input.shape[0]):
-                    fig, ax = plt.subplots()
-
-                    grid_np = np.array(current_input[b])  # Convert from JAX to NumPy
-                    shape_np = np.array(current_shape[b])  # Also convert shape tokens
-
-                    display_grid(ax, grid_np, shape_np)  # Use the utility function
-
-                    ax.set_title(f"Step {t}, Sample {b}")
-                    filename = f"step_{t}_sample_{b}_{unique_run_id}.png"
-                    fig.savefig(os.path.join(save_dir, filename))
-                    plt.close(fig)
+                intermediate_outputs[t] = {
+                    "input": current_input,
+                    "shape": current_shape,
+                    "context": context_col,
+                }
 
         final_output_grids = current_input
         final_output_shapes = current_shape
 
-        return final_output_grids, final_output_shapes
+        return final_output_grids, final_output_shapes, intermediate_outputs if save_intermediate else None
 
     def _generate_output_from_context(
         self, context: chex.Array, input: chex.Array, input_grid_shape: chex.Array, dropout_eval: bool
@@ -1431,7 +1414,7 @@ if __name__ == "__main__":
     )
     print("Gradient Ascent Loss:", loss)
 
-    output_grids, output_shapes, _ = jax.jit(
+    output_grids, output_shapes, _, _ = jax.jit(
         lpn.apply,
         static_argnames=[
             "dropout_eval",
@@ -1464,7 +1447,7 @@ if __name__ == "__main__":
     print("Output grids of shape:", output_grids.shape)
     print("Output shapes of shape:", output_shapes.shape)
 
-    output_grids, output_shapes, _ = jax.jit(
+    output_grids, output_shapes, _, _ = jax.jit(
         partial(
             lpn.apply, optimizer_kwargs={"b1": 0.5}, random_perturbation={"num_samples": 3, "scale": 0.5}
         ),
