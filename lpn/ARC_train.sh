@@ -24,5 +24,5 @@ export PYTHONPATH=${PYTHONPATH}:${PWD}
 python src/recurrent_train.py --config-name arc_train \
   training.log_gradients=true \
   training.log_gradients_every=100 \
-  training.inference_kwargs.trace_computation=true
+  +training.inference_kwargs.trace_computation=true
 
