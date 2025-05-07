@@ -134,6 +134,7 @@ class Evaluator:
                         # Crop input to predicted shape
                         num_rows, num_cols = grid_shape[0]
                         print(f"num_rows: {num_rows}, num_cols: {num_cols}")
+                        print(f"intermediate step {t} vector context: {step_data['context']}")
                         cropped = input_grid[:num_rows, :num_cols].tolist()
 
                         intermediate_attempts[f"step_{t}"] = cropped
@@ -141,9 +142,9 @@ class Evaluator:
 
                 # Crop the output to the predicted shape
                 first_num_rows, first_num_cols = first_output_grid_shape
-                print(f"first_num_rows: {first_num_rows}, first_num_cols: {first_num_cols}")
+
                 second_num_rows, second_num_cols = second_output_grid_shape
-                print(f"second_num_rows: {second_num_rows}, second_num_cols: {second_num_cols}")
+
                 attempts = {
                     "attempt_1": first_output_grid[:first_num_rows, :first_num_cols].tolist(),
                     "attempt_2": second_output_grid[:second_num_rows, :second_num_cols].tolist(),

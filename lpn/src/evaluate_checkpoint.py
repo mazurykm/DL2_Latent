@@ -221,6 +221,8 @@ from src.evaluator import Evaluator
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.recurrent_train import Trainer, load_datasets, instantiate_config_for_mpt
 from src.data_utils import make_leave_one_out, DATASETS_BASE_PATH
+import os
+from datetime import datetime
 
 
 def instantiate_model(cfg: omegaconf.DictConfig, mixed_precision: bool) -> LPN:
@@ -352,9 +354,15 @@ def evaluate_json(
     )
     metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
     metrics["fig"] = fig
-    #save plt.Figure
-    fig.savefig("output.png")
-    print("Figure saved as output.png")
+
+    # Save plt.Figure to a hardcoded folder "intermediate_outputs" with a timestamp in the name
+    output_dir = "intermediate_outputs"
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fig_path = os.path.join(output_dir, f"evaluation_plot_{timestamp}.png")
+    fig.savefig(fig_path)
+    print(f"Figure saved as {fig_path}")
+
     return metrics
 
 
