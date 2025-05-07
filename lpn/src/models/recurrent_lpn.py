@@ -16,8 +16,7 @@ import numpy as np
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.models.utils import EncoderTransformerConfig, DecoderTransformerConfig
 from src.data_utils import make_leave_one_out
-#from src.visualize import display_grid  # Make sure this is properly imported
-#from src.visualize_grads import trace_recurrent_ga_context, visualize_gradient_computation
+from src.visualization import display_grid  # Make sure this is properly imported
 
 
 class LPN(nn.Module):
@@ -143,7 +142,7 @@ class LPN(nn.Module):
                 key = self.make_rng("gradient_ascent_random_perturbation")
             else:
                 key = None
-            context, gradient_info = self._get_recurrent_ga_context(
+            context, _ = self._get_recurrent_ga_context(
                 latents, pairs, grid_shapes, key,
                 matrix_size_rows=matrix_size_rows,
                 matrix_size_cols=matrix_size_cols,
@@ -154,24 +153,6 @@ class LPN(nn.Module):
                 matrix_size_rows=matrix_size_rows,
                 matrix_size_cols=matrix_size_cols,
             )
-            if gradient_info is not None:
-                metrics.update({
-                    "recurrent_ga_gradients": gradient_info["gradients"],
-                    "recurrent_ga_losses": gradient_info["losses"]
-                })
-                gradients = metrics["recurrent_ga_gradients"]
-                losses = metrics["recurrent_ga_losses"]
-        
-                # Visualize the gradient flow
-                fig = visualize_gradient_computation(
-                    gradients, losses, matrix_size_rows, matrix_size_cols
-                )
-                
-                if mode_kwargs.get("trace_computation", False):
-                    trace_recurrent_ga_context(
-                        self, (pairs, grid_shapes), matrix_size_rows, matrix_size_cols
-                    )
-            
 
         else:
             raise ValueError(f"Unsupported mode: {mode}")
@@ -312,11 +293,13 @@ class LPN(nn.Module):
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
         # Decode the output sequence (teacher forcing).
+        print(f"context: {context.shape}")
         context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
             matrix_size_cols=matrix_size_cols,
             latents=context,
         )
+        print(f"context_matrix: {context_matrix.shape}")
         # initial input 
         current_input = input_seq
         final_row_logits, final_col_logits, final_grid_logits = None, None, None
@@ -330,21 +313,13 @@ class LPN(nn.Module):
             
             if t < matrix_size_cols - 1:
        
-            #     row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
-            #         context_col, current_input, current_input, dropout_eval
-            #     )
-            #     predicted_rows = jnp.argmax(row_logits, axis=-1) + 1
-            #     predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
-            #     predicted_tokens = jnp.argmax(grid_logits, axis=-1)
-            #     current_input = jnp.concatenate([predicted_rows[..., None], predicted_cols[..., None], predicted_tokens], axis=-1)
-                # Now I predict shape only on final step
-                _, _, grid_logits, _ = self._generate_logits_from_context(
+                row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
                     context_col, current_input, current_input, dropout_eval
                 )
-                
+                predicted_rows = jnp.argmax(row_logits, axis=-1) + 1
+                predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
                 predicted_tokens = jnp.argmax(grid_logits, axis=-1)
-                current_input = jnp.concatenate([grid_shapes[..., 0], predicted_tokens], axis=-1)
-            
+                current_input = jnp.concatenate([predicted_rows[..., None], predicted_cols[..., None], predicted_tokens], axis=-1)
             else:
 
                 row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
@@ -353,6 +328,30 @@ class LPN(nn.Module):
                 final_row_logits = row_logits
                 final_col_logits = col_logits
                 final_grid_logits = grid_logits
+            # Get logits
+            #row_logits, col_logits, grid_logits, current_input = self._generate_logits_from_context(
+             #   context_col, current_input, output_seq, dropout_eval
+            #)
+            #if t == matrix_size_cols - 1:
+             #   final_row_logits = row_logits
+              #  final_col_logits = col_logits
+               # final_grid_logits = grid_logits
+            # Decode
+            #row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
+
+            # # Predict new shape
+            # predicted_rows = jnp.argmax(row_logits, axis=-1) + 1  # because original shapes are [1, max_rows]
+            # predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
+
+            # # Predict new tokens
+            # predicted_tokens = jnp.argmax(grid_logits, axis=-1)  # (B, R*C)
+
+            # # Prepare new input for next step
+            # predicted_grid_shape_tokens = jnp.stack([predicted_rows, predicted_cols], axis=-1)  # (B, 2)
+            # current_input = jnp.concatenate([predicted_grid_shape_tokens, predicted_tokens], axis=-1)
+            
+
+        #row_logits, col_logits, grid_logits = self.decoder(input_seq, output_seq, context, dropout_eval)
 
         # Compute cross entropy losses.
         grid_shapes_row, grid_shapes_col = grid_shapes[..., 0, 1], grid_shapes[..., 1, 1]
@@ -531,7 +530,7 @@ class LPN(nn.Module):
         info = {"context": first_context}
 
         if return_two_best:
-            output_grids, output_shapes, intermediate_dict = jax.vmap(
+            output_grids, output_shapes = jax.vmap(
                 partial(
                     self._generate_output_from_context_v2,
                     input=input,
@@ -544,13 +543,13 @@ class LPN(nn.Module):
             )(jnp.stack([first_context, second_context], axis=0))
             first_output_grids, second_output_grids = output_grids[0], output_grids[1]
             first_output_shapes, second_output_shapes = output_shapes[0], output_shapes[1]
-            return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info, intermediate_dict
+            return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info
         else:
-            output_grids, output_shapes, intermediate_dict = self._generate_output_from_context_v2(
+            output_grids, output_shapes = self._generate_output_from_context_v2(
                 first_context, input, input_grid_shape, dropout_eval, matrix_size_rows, matrix_size_cols, mode_kwargs.get("save_intermediate_outputs", False)
 
             )
-            return output_grids, output_shapes, info, intermediate_dict
+            return output_grids, output_shapes, info
 
     def _generate_logits_from_context(
         self,
@@ -594,6 +593,7 @@ class LPN(nn.Module):
         matrix_size_rows: int,
         matrix_size_cols: int,
         save_intermediate: bool = False,
+        save_dir: str = "intermediate_outputs",  # where to save if enabled
     ) -> tuple[chex.Array, chex.Array]:
         """
         Recurrently generates output grids using per-column context, without ground-truth output_seq (generation mode).
@@ -610,7 +610,9 @@ class LPN(nn.Module):
             final_output_grids: predicted output grids, shape (B, R, C)
             final_output_shapes: predicted shapes, shape (B, 2)
         """
-        
+        if save_intermediate:
+            os.makedirs(save_dir, exist_ok=True)
+
         # Convert context vector into matrix (B, H, matrix_size_rows, matrix_size_cols)
         context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
@@ -621,8 +623,6 @@ class LPN(nn.Module):
         # Initialize
         current_input = input
         current_shape = input_grid_shape
-
-        intermediate_outputs = {}
 
         for t in range(matrix_size_cols):
             context_col = context_matrix[..., t]   # (B, H, matrix_size_rows)
@@ -676,24 +676,27 @@ class LPN(nn.Module):
 
             # Update current input for next step
             current_input = jnp.reshape(output_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
-            
-            #I change shape only for final step
-            if t >= matrix_size_cols - 1:
-                current_shape = output_shapes
-            
-            # Optionally save intermediate outputs
+            current_shape = output_shapes
+
             if save_intermediate:
-                intermediate_outputs[t] = {
-                    "input": current_input,
-                    "shape": current_shape,
-                    "context": context_col,
-                }
+                unique_run_id = str(uuid.uuid4())[:8]  # Unique ID to avoid overwriting
+                for b in range(current_input.shape[0]):
+                    fig, ax = plt.subplots()
+
+                    grid_np = np.array(current_input[b])  # Convert from JAX to NumPy
+                    shape_np = np.array(current_shape[b])  # Also convert shape tokens
+
+                    display_grid(ax, grid_np, shape_np)  # Use the utility function
+
+                    ax.set_title(f"Step {t}, Sample {b}")
+                    filename = f"step_{t}_sample_{b}_{unique_run_id}.png"
+                    fig.savefig(os.path.join(save_dir, filename))
+                    plt.close(fig)
 
         final_output_grids = current_input
         final_output_shapes = current_shape
 
-
-        return final_output_grids, final_output_shapes, intermediate_outputs if save_intermediate else None
+        return final_output_grids, final_output_shapes
 
     def _generate_output_from_context(
         self, context: chex.Array, input: chex.Array, input_grid_shape: chex.Array, dropout_eval: bool
@@ -758,21 +761,19 @@ class LPN(nn.Module):
         matrix_size_cols: int,
         optimizer_kwargs: Optional[dict] = None,
         dropout_eval: bool = True,
-        log_gradients: bool = False,
         **kwargs,
     ) -> tuple[chex.Array, chex.Array]:
+       # print(">>> Entered _get_recurrent_ga_context", flush=True)
         batch_size = pairs.shape[0]
         latent_matrix = latents.mean(axis=1).reshape(batch_size, matrix_size_rows, matrix_size_cols)
-        
-        # For logging gradients
-        all_gradients = []
-        all_losses = []
-        
+        print(f"    latent_matrix shape: {latent_matrix.shape}", flush=True)
+
         def compute_avg_loss(latent_matrix):
-            flat_context = latent_matrix.reshape(batch_size, -1)
+            flat_context = latent_matrix.reshape(batch_size, -1)  # (B, H)
             flat_context = flat_context[:, None, :]
             total_loss = 0.0
             for i in range(pairs.shape[1]):
+                print(f"        - computing loss for pair {i}", flush=True)
                 loss, _ = self._loss_from_pair_and_context(
                     context=flat_context, 
                     pairs=pairs[:, i:i+1],
@@ -783,21 +784,20 @@ class LPN(nn.Module):
                 )
                 total_loss += loss
             avg_loss = jnp.mean(total_loss)
+            print(f"    > compute_avg_loss returning {avg_loss}", flush=True)
             return avg_loss
-             
+            
         optimizer = optax.adam(lr, **(optimizer_kwargs or {}))
         opt_state = optimizer.init(latent_matrix)
         
         grad_fn = jax.value_and_grad(compute_avg_loss)
 
+
         for col_idx in range(matrix_size_cols):
             for step in range(num_steps):
+                print(f"    >> Step {step} for column {col_idx}", flush=True)
                 loss_val, grads = grad_fn(latent_matrix)
-                
-                if log_gradients:
-                    all_losses.append(loss_val)
-                    all_gradients.append(grads)
-                
+
                 mask = jnp.arange(matrix_size_cols) == col_idx
                 mask = mask.astype(latent_matrix.dtype)
                 mask = mask.reshape((1,) * (latent_matrix.ndim - 1) + (-1,))
@@ -807,10 +807,8 @@ class LPN(nn.Module):
                 latent_matrix = optax.apply_updates(latent_matrix, updates)
 
         optimized_context = latent_matrix.reshape(batch_size, -1)
-        
-        # Return gradient flow information if requested
-        info = {"gradients": all_gradients, "losses": all_losses} if log_gradients else None
-        return optimized_context, info
+
+        return optimized_context, None
 
 
 
@@ -1248,10 +1246,9 @@ class LPN(nn.Module):
         log_probs = row_log_probs + col_log_probs + grid_log_prob_weight * grid_log_probs
        # log_probs = jnp.sum(log_probs, axis=-1)  # sum log_probs over the pairs
         if use_product_score:
-	        log_probs = jnp.log(jnp.clip(jnp.exp(log_probs).prod(axis=-1), a_min=1e-10))
+            log_probs = jnp.log(jnp.clip(jnp.exp(log_probs).prod(axis=-1), a_min=1e-10))
         else:
-    	    log_probs = jnp.sum(log_probs, axis=-1)
-
+            log_probs = jnp.sum(log_probs, axis=-1)
         return log_probs
 
     def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:
@@ -1432,7 +1429,7 @@ if __name__ == "__main__":
     )
     print("Gradient Ascent Loss:", loss)
 
-    output_grids, output_shapes, _, _ = jax.jit(
+    output_grids, output_shapes, _ = jax.jit(
         lpn.apply,
         static_argnames=[
             "dropout_eval",
@@ -1465,7 +1462,7 @@ if __name__ == "__main__":
     print("Output grids of shape:", output_grids.shape)
     print("Output shapes of shape:", output_shapes.shape)
 
-    output_grids, output_shapes, _, _ = jax.jit(
+    output_grids, output_shapes, _ = jax.jit(
         partial(
             lpn.apply, optimizer_kwargs={"b1": 0.5}, random_perturbation={"num_samples": 3, "scale": 0.5}
         ),
