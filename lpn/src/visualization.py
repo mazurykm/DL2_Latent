@@ -151,7 +151,6 @@ def visualize_json_submission(
             intermediate = generation.get("intermediate_attempts", {})
             for i, (step_name, step_grid) in enumerate(sorted(intermediate.items(), key=lambda x: int(x[0].split("_")[1]))):
                 row = row_offset + 3 + i
-                print(f"Step {i}: shape {step_grid.shape}")
                 step_grid_np = np.squeeze(np.array(step_grid))
                 display_grid(axs[row, test_index], step_grid_np, (30, 30))
                 axs[row, test_index].set_title(f"Intermediate {step_name}")
