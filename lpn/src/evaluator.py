@@ -128,15 +128,12 @@ class Evaluator:
                     # Step 3: Build list of intermediate cropped inputs
                     intermediate_attempts = {}
                     for t, step_data in intermediate_dict_host.items():
-                        input_grid = step_data["input"]
+                        input_grid = step_data["input"][0] # had to remove one more
                         grid_shape = step_data["shape"]
 
                         # Crop input to predicted shape
                         num_rows, num_cols = grid_shape[0]
-                        print(f"num_rows: {num_rows}, num_cols: {num_cols}")
-                        print(f"input_grid.shape: {input_grid.shape}")
                         cropped = input_grid[:num_rows, :num_cols].tolist()
-                        print(f"cropped.shape: {cropped.shape}")
 
                         intermediate_attempts[f"step_{t}"] = cropped
 
