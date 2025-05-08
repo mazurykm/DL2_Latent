@@ -1,9 +1,9 @@
 #!/bin/sh
 #SBATCH --partition=gpu_a100
-#SBATCH --gpus=2
+#SBATCH --gpus=1
 #SBATCH --job-name=grad_flow
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
 #SBATCH --time=2:00:00
 #SBATCH --output=/home/scur2570/grad_flow/DL2_Latent/lpn/out/slurm_output_%A.out
 

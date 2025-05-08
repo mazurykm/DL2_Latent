@@ -898,45 +898,40 @@ class Trainer:
     
     def visualize_gradient_flow(self, grads, step):
         """Memory-efficient gradient visualization"""
-        import matplotlib
-        matplotlib.use('Agg')  # Reduce memory usage with non-interactive backend
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import os
         
-        # Process gradients in smaller chunks
+        # Process only encoder and decoder gradients to save memory
         flat_grads = []
         layer_names = []
         
-        def process_chunk(g, name, chunk_size=100):
-            """Process dictionary in chunks to avoid memory spikes"""
+        def extract_grads(g, name, max_depth=3, current_depth=0):
+            """Only extract gradients up to a certain depth to save memory"""
             if isinstance(g, dict):
-                items = list(g.items())
-                for i in range(0, len(items), chunk_size):
-                    chunk = items[i:i+chunk_size]
-                    for k, v in chunk:
-                        process_chunk(v, f"{name}/{k}")
+                if current_depth < max_depth:
+                    for k, v in g.items():
+                        extract_grads(v, f"{name}/{k}", max_depth, current_depth + 1)
             elif hasattr(g, 'shape'):
-                # Convert to NumPy immediately to free JAX memory
                 try:
-                    # Use float32 to reduce precision and memory
+                    # Convert to NumPy immediately to free JAX memory
                     value = float(np.abs(np.array(g, dtype=np.float32)).mean())
                     flat_grads.append(value)
                     layer_names.append(name)
                 except:
                     pass
         
-        # Process in chunks
-        process_chunk(grads, "")
+        # Only extract from encoder and decoder parts
+        encoder_grads = grads.get('encoder', {})
+        decoder_grads = grads.get('decoder', {})
+        extract_grads(encoder_grads, "encoder")
+        extract_grads(decoder_grads, "decoder")
         
-        # Take only top 50 gradients to reduce memory and improve visualization
-        if len(flat_grads) > 50:
-            indices = np.argsort(flat_grads)[-50:]
+        # Take only top 30 gradients to reduce memory use
+        if len(flat_grads) > 30:
+            indices = np.argsort(flat_grads)[-30:]
             flat_grads = [flat_grads[i] for i in indices]
             layer_names = [layer_names[i] for i in indices]
         
-        # Lower resolution figure
-        plt.figure(figsize=(8, 6), dpi=72)
+        # Use smaller figure and lower DPI
+        plt.figure(figsize=(8, 5), dpi=72)
         plt.barh(range(len(flat_grads)), flat_grads, align='center')
         plt.yticks(range(len(flat_grads)), layer_names)
         plt.xlabel('Average Gradient Magnitude')
@@ -950,7 +945,7 @@ class Trainer:
         plt.savefig(filename, dpi=72, format='png', bbox_inches='tight')
         
         fig = plt.gcf()
-        plt.close(fig)  # Explicit cleanup
+        plt.close(fig) 
         return fig
 
 def instantiate_config_for_mpt(
