@@ -109,6 +109,8 @@ class Evaluator:
                     jax.tree_util.tree_map(lambda x: x[0, 0], outputs)
                 )
                 # The same for dict
+                intermediate_attempts = {}
+
                 if intermediate_dict is not None:
                     # Step 1: Move the entire dict from device to host
                     intermediate_dict_host = jax.device_get(intermediate_dict)
@@ -126,7 +128,6 @@ class Evaluator:
                     }
 
                     # Step 3: Build list of intermediate cropped inputs
-                    intermediate_attempts = {}
                     for t, step_data in intermediate_dict_host.items():
                         input_grid = step_data["input"][0] # had to remove one more
                         grid_shape = step_data["shape"]
