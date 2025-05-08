@@ -369,25 +369,51 @@ class Trainer:
     
     def train_one_step(self, state: TrainState, batch, key: chex.PRNGKey) -> tuple[TrainState, dict]:
         pairs, grid_shapes = batch
-        grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
-            {"params": state.params},
-            pairs,
-            grid_shapes,
-            dropout_eval=False,
-            prior_kl_coeff=self.prior_kl_coeff,
-            pairwise_kl_coeff=self.pairwise_kl_coeff,
-            matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
-            matrix_size_cols=self.model.decoder.config.matrix_size_cols,
-            mode=self.train_inference_mode,
-            rngs=key,
-            **self.train_inference_kwargs,
-        )
+        # Limit which gradients get stored based on current step
+        do_log_grads = False
+        if hasattr(self, 'num_steps') and hasattr(self.cfg.training, "log_gradients"):
+            log_gradients = self.cfg.training.log_gradients
+            log_every = getattr(self.cfg.training, "log_gradients_every", 100)
+            do_log_grads = log_gradients and (self.num_steps % log_every == 0)
         
-        # Instead of conditional logic, always store the gradients and step
-        # The filtering will happen later in train_n_steps
-        orig_grads = jax.tree_map(lambda x: x, grads["params"])
-        metrics["orig_grads"] = orig_grads
-        metrics["step"] = state.step  # Store the step for later filtering
+        if do_log_grads:
+            # Use value_and_grad to get both loss and gradients
+            grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
+                {"params": state.params},
+                pairs,
+                grid_shapes,
+                dropout_eval=False,
+                prior_kl_coeff=self.prior_kl_coeff,
+                pairwise_kl_coeff=self.pairwise_kl_coeff,
+                matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
+                matrix_size_cols=self.model.decoder.config.matrix_size_cols,
+                mode=self.train_inference_mode,
+                rngs=key,
+                **self.train_inference_kwargs,
+            )
+            # Only store specific gradients we care about (e.g., encoder and decoder weights)
+            # This significantly reduces memory usage
+            orig_grads = {}
+            if 'encoder' in grads["params"]:
+                orig_grads['encoder'] = jax.tree_map(lambda x: x, grads["params"]['encoder'])
+            if 'decoder' in grads["params"]:
+                orig_grads['decoder'] = jax.tree_map(lambda x: x, grads["params"]['decoder'])
+            metrics["orig_grads"] = orig_grads
+        else:
+            # When not logging gradients, just compute normally
+            grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
+                {"params": state.params},
+                pairs,
+                grid_shapes,
+                dropout_eval=False,
+                prior_kl_coeff=self.prior_kl_coeff,
+                pairwise_kl_coeff=self.pairwise_kl_coeff,
+                matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
+                matrix_size_cols=self.model.decoder.config.matrix_size_cols,
+                mode=self.train_inference_mode,
+                rngs=key,
+                **self.train_inference_kwargs,
+            )
         
         grads = grads["params"]
         grads = jax.lax.pmean(grads, axis_name="devices")
@@ -871,52 +897,61 @@ class Trainer:
         )
     
     def visualize_gradient_flow(self, grads, step):
-        """Optimized gradient visualization with lower memory footprint"""
+        """Memory-efficient gradient visualization"""
+        import matplotlib
+        matplotlib.use('Agg')  # Reduce memory usage with non-interactive backend
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import os
         
-        # Process gradients in batches to reduce peak memory
+        # Process gradients in smaller chunks
         flat_grads = []
         layer_names = []
         
-        def extract_grads(g, name, max_items=250):  # Limit number of items
+        def process_chunk(g, name, chunk_size=100):
+            """Process dictionary in chunks to avoid memory spikes"""
             if isinstance(g, dict):
-                for k, v in list(g.items())[:max_items]:  # Limit dictionary items
-                    extract_grads(v, f"{name}/{k}")
+                items = list(g.items())
+                for i in range(0, len(items), chunk_size):
+                    chunk = items[i:i+chunk_size]
+                    for k, v in chunk:
+                        process_chunk(v, f"{name}/{k}")
             elif hasattr(g, 'shape'):
-                # Convert to numpy immediately to free JAX memory
+                # Convert to NumPy immediately to free JAX memory
                 try:
-                    flat_grads.append(float(np.abs(np.array(g)).mean()))
+                    # Use float32 to reduce precision and memory
+                    value = float(np.abs(np.array(g, dtype=np.float32)).mean())
+                    flat_grads.append(value)
                     layer_names.append(name)
                 except:
-                    pass  # Skip if conversion fails
+                    pass
         
-        # Extract gradients with memory limits
-        extract_grads(grads, "")
+        # Process in chunks
+        process_chunk(grads, "")
         
-        # Sort by magnitude to focus on most significant gradients
-        sorted_indices = np.argsort(flat_grads)
-        significant_indices = sorted_indices[-100:]  # Keep only top 100 gradients
+        # Take only top 50 gradients to reduce memory and improve visualization
+        if len(flat_grads) > 50:
+            indices = np.argsort(flat_grads)[-50:]
+            flat_grads = [flat_grads[i] for i in indices]
+            layer_names = [layer_names[i] for i in indices]
         
-        # Plot only significant gradients
-        plt.figure(figsize=(10, 6), dpi=100)  # Lower DPI
-        plt.barh(range(len(significant_indices)), 
-                [flat_grads[i] for i in significant_indices], 
-                align='center')
-        plt.yticks(range(len(significant_indices)), 
-                [layer_names[i] for i in significant_indices])
+        # Lower resolution figure
+        plt.figure(figsize=(8, 6), dpi=72)
+        plt.barh(range(len(flat_grads)), flat_grads, align='center')
+        plt.yticks(range(len(flat_grads)), layer_names)
         plt.xlabel('Average Gradient Magnitude')
         plt.title(f'Gradient Flow at Step {step}')
         plt.grid(True)
         plt.tight_layout()
         
-        # Save with lower quality to reduce file size
+        # Save with low resolution
         os.makedirs('flows', exist_ok=True)
-        plt.savefig(f'flows/gradient_flow_step_{step}.png', 
-                    dpi=72, bbox_inches='tight', format='png')
+        filename = f'flows/gradient_flow_step_{step}.png'
+        plt.savefig(filename, dpi=72, format='png', bbox_inches='tight')
         
         fig = plt.gcf()
-        plt.close(fig)  # Close plot to free memory
+        plt.close(fig)  # Explicit cleanup
         return fig
-
 
 def instantiate_config_for_mpt(
     transformer_cfg: omegaconf.DictConfig,

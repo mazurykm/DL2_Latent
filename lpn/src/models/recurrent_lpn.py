@@ -233,35 +233,19 @@ class LPN(nn.Module):
         }
         return latents, kl_loss, kl_metrics
 
-    def _convert_to_matrix(
-        self, 
-        matrix_size_rows: jnp.int32,
-        matrix_size_cols: jnp.int32, 
-        latents: chex.Array):
-        """
-        Converts the latents to a matrix.
-        Args:
-            matrix_size_rows: number of rows in the matrix.
-            matrix_size_cols: number of columns in the matrix.
-            latents: latents to be converted. Shape (*B, N, H).
-        Returns:
-            latents_reshaped: latents reshaped to a matrix. Shape (*B, rows, cols).
-        """
-
-        # latents is (1,4,3,64)
+    def _convert_to_matrix(self, matrix_size_rows: jnp.int32, matrix_size_cols: jnp.int32, latents: chex.Array):
+        """Memory-efficient conversion of latents to matrix."""
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
-        print(f"latent_dim: {latent_dim}")
-        print(f"matrix_size_rows: {matrix_size_rows}")
-        print(f"matrix_size_cols: {matrix_size_cols}")
-        print(f"batch_shape: {batch_shape}")
-        # Convert matrix_size to a concrete value
-        # matrix_size_int = matrix_size.astype(jnp.int32)
         
-        # make a (1,4,3,8,8)
-        static_shape = (*batch_shape, matrix_size_rows, matrix_size_cols)
-        latents_reshaped = latents.reshape(static_shape)
+        # Ensure we're not exceeding latent dimension
+        max_size = latent_dim // matrix_size_cols
+        safe_rows = jnp.minimum(matrix_size_rows, max_size)
         
+        # Use static shape and padding approach
+        static_shape = (*batch_shape, safe_rows, matrix_size_cols)
+        latents_truncated = latents[..., :safe_rows*matrix_size_cols]
+        latents_reshaped = latents_truncated.reshape(static_shape)    
         return latents_reshaped
 
     def _loss_from_pair_and_context(
@@ -293,13 +277,13 @@ class LPN(nn.Module):
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
         # Decode the output sequence (teacher forcing).
-        print(f"context: {context.shape}")
+        # print(f"context: {context.shape}")
         context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
             matrix_size_cols=matrix_size_cols,
             latents=context,
         )
-        print(f"context_matrix: {context_matrix.shape}")
+        # print(f"context_matrix: {context_matrix.shape}")
         # initial input 
         current_input = input_seq
         final_row_logits, final_col_logits, final_grid_logits = None, None, None
@@ -309,7 +293,7 @@ class LPN(nn.Module):
 
             # Get the context for the current column
             context_col = context_matrix[..., t]
-            print(f"context_col: {context_col.shape}")
+            #print(f"context_col: {context_col.shape}")
             
             if t < matrix_size_cols - 1:
        
