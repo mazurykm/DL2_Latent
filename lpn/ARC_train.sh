@@ -4,7 +4,7 @@
 #SBATCH --job-name=grad_flow
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=1:00:00
+#SBATCH --time=2:00:00
 #SBATCH --output=/home/scur2570/grad_flow/DL2_Latent/lpn/out/slurm_output_%A.out
 
 module purge
