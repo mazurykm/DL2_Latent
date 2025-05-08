@@ -234,26 +234,31 @@ class LPN(nn.Module):
         return latents, kl_loss, kl_metrics
 
     def _convert_to_matrix(self, matrix_size_rows: jnp.int32, matrix_size_cols: jnp.int32, latents: chex.Array):
-        """Memory-efficient conversion of latents to matrix using static slicing."""
+        """Convert latents to matrix using dynamic_slice."""
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
         
-        # Create a fixed-size matrix with the maximum possible dimensions
+        # Calculate maximum number of elements to use
         max_elements = matrix_size_rows * matrix_size_cols
+        valid_elements = jnp.minimum(max_elements, latent_dim)
         
-        # Use static shape for the output
+        # Create a static shape for the output
         static_shape = (*batch_shape, matrix_size_rows, matrix_size_cols)
         
-        # Use padding approach with fixed size rather than dynamic slicing
+        # Create padded latent tensor
         padded_latents = jnp.zeros((*batch_shape, max_elements))
         
-        # Copy valid elements (up to latent_dim)
-        valid_elements = jnp.minimum(max_elements, latent_dim)
-        padded_latents = padded_latents.at[..., :valid_elements].set(
-            latents[..., :valid_elements]
+        # Use dynamic_update_slice to place the valid latent values
+        start_indices = jnp.zeros(len(batch_shape) + 1, dtype=jnp.int32)
+        padded_latents = jax.lax.dynamic_update_slice(
+            padded_latents, 
+            latents[..., :valid_elements], 
+            start_indices
         )
+        
         # Reshape to matrix form
         latents_reshaped = padded_latents.reshape(static_shape)
+        
         return latents_reshaped
 
     def _loss_from_pair_and_context(
