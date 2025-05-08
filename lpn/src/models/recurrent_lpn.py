@@ -234,34 +234,29 @@ class LPN(nn.Module):
         return latents, kl_loss, kl_metrics
 
     def _convert_to_matrix(self, matrix_size_rows: jnp.int32, matrix_size_cols: jnp.int32, latents: chex.Array):
-        """Convert latents to matrix using static slicing and padding."""
+        """Convert latents to matrix using static operations only."""
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
         
-        # Calculate the maximum size of the matrix we need
+        # Calculate the total elements in the matrix
         max_elements = matrix_size_rows * matrix_size_cols
         
-        # Define a static output shape
-        static_shape = (*batch_shape, matrix_size_rows, matrix_size_cols)
-        
-        # Create a zero-filled tensor with our desired shape
+        # Create an output array filled with zeros
         result = jnp.zeros((*batch_shape, max_elements))
         
-        # Create a mask for valid elements (static approach)
-        # This creates a boolean mask that is True for indices < valid_elements
-        indices = jnp.arange(max_elements)
-        valid_mask = indices < jnp.minimum(max_elements, latent_dim)
+        # Create a padded version of latents that's always big enough
+        padded_latents = jnp.pad(latents, ((0,) * len(batch_shape), (0, max(0, max_elements - latent_dim))))
         
-        # Use the mask to copy elements from the latent vector
-        # This way we only copy as many elements as we need, up to the minimum of max_elements or latent_dim
-        result = result.at[..., indices].set(
-            jnp.where(valid_mask, 
-                    jnp.pad(latents, ((0,) * len(batch_shape), (0, max(0, max_elements - latent_dim)))),
-                    result[..., indices])
-        )
+        # Take only the first max_elements elements (static indexing)
+        truncated_latents = padded_latents[..., :max_elements]
         
-        # Reshape to final matrix form
-        result_reshaped = result.reshape(static_shape)
+        # Set these values in our result tensor
+        result = truncated_latents
+        
+        # Reshape to target dimensions
+        result_reshaped = result.reshape((*batch_shape, matrix_size_rows, matrix_size_cols))
+        
+        return result_reshaped
         
         return result_reshaped
 
