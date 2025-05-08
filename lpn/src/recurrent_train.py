@@ -383,17 +383,11 @@ class Trainer:
             **self.train_inference_kwargs,
         )
         
-        # Check if we need to capture gradients for visualization
-        log_gradients = getattr(self.cfg.training, "log_gradients", False)
-        log_every = getattr(self.cfg.training, "log_gradients_every", 100)
-        do_log_grads = log_gradients and (state.step % log_every == 0 or 
-                                        (state.step + 1) % log_every == 0)
-        
-        # Only store gradients if we're going to visualize them soon
-        if do_log_grads:
-            # Store a selective copy of gradients (only parameters we want to visualize)
-            orig_grads = jax.tree_map(lambda x: x, grads["params"])
-            metrics["orig_grads"] = orig_grads
+        # Instead of conditional logic, always store the gradients and step
+        # The filtering will happen later in train_n_steps
+        orig_grads = jax.tree_map(lambda x: x, grads["params"])
+        metrics["orig_grads"] = orig_grads
+        metrics["step"] = state.step  # Store the step for later filtering
         
         grads = grads["params"]
         grads = jax.lax.pmean(grads, axis_name="devices")
@@ -420,21 +414,23 @@ class Trainer:
         log_gradients = getattr(self.cfg.training, "log_gradients", False)
         log_every = getattr(self.cfg.training, "log_gradients_every", 100)
         
-        if "orig_grads" in metrics and log_gradients and self.num_steps % log_every == 0:
-            # Get first device gradients only, without copying full structure
-            device_grads = jax.tree_map(
-                lambda x: x[0] if hasattr(x, 'shape') and len(x.shape) > 0 else x,
-                metrics.pop("orig_grads")
-            )
-            
-            # Make a copy and delete immediately to free memory
-            fig = self.visualize_gradient_flow(device_grads, self.num_steps)
-            metrics["gradient_flow_fig"] = fig
-            # Clear the large gradient data from memory
-            device_grads = None
-        else:
-            # Remove gradients when not visualizing to save memory
-            if "orig_grads" in metrics:
+        if "orig_grads" in metrics and log_gradients:
+            if "step" in metrics:
+                _ = metrics.pop("step")  # Remove but don't use
+                
+            # Check if we need to log gradients for this step (using self.num_steps)
+            if self.num_steps % log_every == 0:
+                # Get first device gradients only, without copying full structure
+                device_grads = jax.tree_map(
+                    lambda x: x[0] if hasattr(x, 'shape') and len(x.shape) > 0 else x,
+                    metrics.pop("orig_grads")
+                )
+                
+                # Create visualization
+                fig = self.visualize_gradient_flow(device_grads, self.num_steps)
+                metrics["gradient_flow_fig"] = fig
+            else:
+                # Remove gradients when not visualizing to save memory
                 _ = metrics.pop("orig_grads")
         
         # Mean the metrics over the devices and the n mini-batches
