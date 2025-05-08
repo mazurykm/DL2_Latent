@@ -234,32 +234,36 @@ class LPN(nn.Module):
         return latents, kl_loss, kl_metrics
 
     def _convert_to_matrix(self, matrix_size_rows: jnp.int32, matrix_size_cols: jnp.int32, latents: chex.Array):
-        """Convert latents to matrix using dynamic_slice."""
+        """Convert latents to matrix using static slicing and padding."""
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
         
-        # Calculate maximum number of elements to use
+        # Calculate the maximum size of the matrix we need
         max_elements = matrix_size_rows * matrix_size_cols
-        valid_elements = jnp.minimum(max_elements, latent_dim)
         
-        # Create a static shape for the output
+        # Define a static output shape
         static_shape = (*batch_shape, matrix_size_rows, matrix_size_cols)
         
-        # Create padded latent tensor
-        padded_latents = jnp.zeros((*batch_shape, max_elements))
+        # Create a zero-filled tensor with our desired shape
+        result = jnp.zeros((*batch_shape, max_elements))
         
-        # Use dynamic_update_slice to place the valid latent values
-        start_indices = jnp.zeros(len(batch_shape) + 1, dtype=jnp.int32)
-        padded_latents = jax.lax.dynamic_update_slice(
-            padded_latents, 
-            latents[..., :valid_elements], 
-            start_indices
+        # Create a mask for valid elements (static approach)
+        # This creates a boolean mask that is True for indices < valid_elements
+        indices = jnp.arange(max_elements)
+        valid_mask = indices < jnp.minimum(max_elements, latent_dim)
+        
+        # Use the mask to copy elements from the latent vector
+        # This way we only copy as many elements as we need, up to the minimum of max_elements or latent_dim
+        result = result.at[..., indices].set(
+            jnp.where(valid_mask, 
+                    jnp.pad(latents, ((0,) * len(batch_shape), (0, max(0, max_elements - latent_dim)))),
+                    result[..., indices])
         )
         
-        # Reshape to matrix form
-        latents_reshaped = padded_latents.reshape(static_shape)
+        # Reshape to final matrix form
+        result_reshaped = result.reshape(static_shape)
         
-        return latents_reshaped
+        return result_reshaped
 
     def _loss_from_pair_and_context(
         self,
