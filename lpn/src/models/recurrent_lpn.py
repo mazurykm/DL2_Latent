@@ -241,22 +241,19 @@ class LPN(nn.Module):
         # Calculate the total elements in the matrix
         max_elements = matrix_size_rows * matrix_size_cols
         
-        # Create an output array filled with zeros
-        result = jnp.zeros((*batch_shape, max_elements))
+        # Create proper padding specification
+        # One padding pair (0,0) for each batch dimension, plus one padding pair for the latent dimension
+        pad_width = [(0, 0) for _ in range(len(batch_shape))]
+        pad_width.append((0, max(0, max_elements - latent_dim)))
         
         # Create a padded version of latents that's always big enough
-        padded_latents = jnp.pad(latents, ((0,) * len(batch_shape), (0, max(0, max_elements - latent_dim))))
+        padded_latents = jnp.pad(latents, pad_width)
         
         # Take only the first max_elements elements (static indexing)
         truncated_latents = padded_latents[..., :max_elements]
         
-        # Set these values in our result tensor
-        result = truncated_latents
-        
         # Reshape to target dimensions
-        result_reshaped = result.reshape((*batch_shape, matrix_size_rows, matrix_size_cols))
-        
-        return result_reshaped
+        result_reshaped = truncated_latents.reshape((*batch_shape, matrix_size_rows, matrix_size_cols))
         
         return result_reshaped
 
