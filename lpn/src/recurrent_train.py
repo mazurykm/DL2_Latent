@@ -367,10 +367,35 @@ class Trainer:
         """Memory-efficient gradient accumulation with explicit control flow."""
         grad_acc = self.gradient_accumulation_steps
         
+        # Check if batch is smaller than gradient accumulation steps
+        if batch[0].shape[0] < grad_acc:
+            # Fall back to simple forward/backward without accumulation
+            pairs, grid_shapes = batch
+            grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
+                {"params": state.params},
+                pairs,
+                grid_shapes,
+                dropout_eval=False,
+                prior_kl_coeff=self.prior_kl_coeff,
+                pairwise_kl_coeff=self.pairwise_kl_coeff,
+                matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
+                matrix_size_cols=self.model.decoder.config.matrix_size_cols,
+                mode=self.train_inference_mode,
+                rngs=key,
+                **self.train_inference_kwargs,
+            )
+            
+            grads = grads["params"]
+            grads = jax.lax.pmean(grads, axis_name="devices")
+            state = state.apply_gradients(grads=grads)
+            metrics.update(grad_norm=optax.global_norm(grads))
+            
+            return state, metrics
+        
+        # Original code for when batch is divisible by grad_acc
         # Split the batch into smaller chunks
         batches = tree_map(lambda x: x.reshape(grad_acc, x.shape[0] // grad_acc, *x.shape[1:]), batch)
         keys = jax.random.split(key, grad_acc)
-        
         # Initialize accumulated gradients
         grads_acc = None
         metrics_acc = None
