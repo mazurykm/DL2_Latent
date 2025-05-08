@@ -233,29 +233,51 @@ class LPN(nn.Module):
         }
         return latents, kl_loss, kl_metrics
 
+    # def _convert_to_matrix(self, matrix_size_rows: jnp.int32, matrix_size_cols: jnp.int32, latents: chex.Array):
+    #     """Convert latents to matrix using static operations only."""
+    #     batch_shape = latents.shape[:-1]
+    #     latent_dim = latents.shape[-1]
+        
+    #     # Calculate the total elements in the matrix
+    #     max_elements = matrix_size_rows * matrix_size_cols
+        
+    #     # Create proper padding specification
+    #     # One padding pair (0,0) for each batch dimension, plus one padding pair for the latent dimension
+    #     pad_width = [(0, 0) for _ in range(len(batch_shape))]
+    #     pad_width.append((0, max(0, max_elements - latent_dim)))
+        
+    #     # Create a padded version of latents that's always big enough
+    #     padded_latents = jnp.pad(latents, pad_width)
+        
+    #     # Take only the first max_elements elements (static indexing)
+    #     truncated_latents = padded_latents[..., :max_elements]
+        
+    #     # Reshape to target dimensions
+    #     result_reshaped = truncated_latents.reshape((*batch_shape, matrix_size_rows, matrix_size_cols))
+        
+    #     return result_reshaped
     def _convert_to_matrix(self, matrix_size_rows: jnp.int32, matrix_size_cols: jnp.int32, latents: chex.Array):
-        """Convert latents to matrix using static operations only."""
+        """Static and memory-efficient conversion of latents to matrix."""
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
         
-        # Calculate the total elements in the matrix
+        # Use fixed matrix size
         max_elements = matrix_size_rows * matrix_size_cols
         
-        # Create proper padding specification
-        # One padding pair (0,0) for each batch dimension, plus one padding pair for the latent dimension
-        pad_width = [(0, 0) for _ in range(len(batch_shape))]
-        pad_width.append((0, max(0, max_elements - latent_dim)))
+        # Create output shape with static dimensions
+        static_shape = (*batch_shape, matrix_size_rows, matrix_size_cols)
         
-        # Create a padded version of latents that's always big enough
-        padded_latents = jnp.pad(latents, pad_width)
+        # Create a zero-filled output tensor
+        result = jnp.zeros(static_shape, dtype=latents.dtype)
         
-        # Take only the first max_elements elements (static indexing)
-        truncated_latents = padded_latents[..., :max_elements]
+        # Copy valid elements - use a static approach to avoid dynamic slicing
+        valid_elems = min(latent_dim, max_elements)
         
-        # Reshape to target dimensions
-        result_reshaped = truncated_latents.reshape((*batch_shape, matrix_size_rows, matrix_size_cols))
+        # Reshape with zero-padding and fixed dimensions
+        flat_result = result.reshape(*batch_shape, -1)
+        flat_result = flat_result.at[..., :valid_elems].set(latents[..., :valid_elems])
         
-        return result_reshaped
+        return flat_result.reshape(static_shape)
 
     def _loss_from_pair_and_context(
         self,

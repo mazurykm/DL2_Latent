@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH --partition=gpu_a100
-#SBATCH --gpus=1
+#SBATCH --gpus=2
 #SBATCH --job-name=grad_flow
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

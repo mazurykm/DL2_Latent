@@ -82,11 +82,7 @@ class Trainer:
             return state, metrics
 
         self.pmap_train_steps = jax.pmap(
-            lambda state, batches, keys: jax.lax.scan(
-                lambda s, b_k: train_one_step_accumulate(s, *b_k),
-                state,
-                (batches, keys),
-            ),
+            train_one_step_accumulate,
             axis_name="devices",
             devices=self.devices,
         )
@@ -368,59 +364,58 @@ class Trainer:
     #     return state, metrics
     
     def train_one_step(self, state: TrainState, batch, key: chex.PRNGKey) -> tuple[TrainState, dict]:
-        pairs, grid_shapes = batch
-        # Limit which gradients get stored based on current step
-        do_log_grads = False
-        if hasattr(self, 'num_steps') and hasattr(self.cfg.training, "log_gradients"):
-            log_gradients = self.cfg.training.log_gradients
-            log_every = getattr(self.cfg.training, "log_gradients_every", 100)
-            do_log_grads = log_gradients and (self.num_steps % log_every == 0)
+        """Memory-efficient gradient accumulation with explicit control flow."""
+        grad_acc = self.gradient_accumulation_steps
         
-        if do_log_grads:
-            # Use value_and_grad to get both loss and gradients
+        # Split the batch into smaller chunks
+        batches = tree_map(lambda x: x.reshape(grad_acc, x.shape[0] // grad_acc, *x.shape[1:]), batch)
+        keys = jax.random.split(key, grad_acc)
+        
+        # Initialize accumulated gradients
+        grads_acc = None
+        metrics_acc = None
+        
+        # Manually iterate instead of using scan
+        for i in range(grad_acc):
+            curr_batch = tree_map(lambda x: x[i], batches)
+            curr_key = keys[i]
+            
+            # Get gradients without accumulating in train state
             grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
                 {"params": state.params},
-                pairs,
-                grid_shapes,
+                curr_batch[0],  # pairs
+                curr_batch[1],  # grid_shapes
                 dropout_eval=False,
                 prior_kl_coeff=self.prior_kl_coeff,
                 pairwise_kl_coeff=self.pairwise_kl_coeff,
                 matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
                 matrix_size_cols=self.model.decoder.config.matrix_size_cols,
                 mode=self.train_inference_mode,
-                rngs=key,
+                rngs=curr_key,
                 **self.train_inference_kwargs,
             )
-            # Only store specific gradients we care about (e.g., encoder and decoder weights)
-            # This significantly reduces memory usage
-            orig_grads = {}
-            if 'encoder' in grads["params"]:
-                orig_grads['encoder'] = jax.tree_map(lambda x: x, grads["params"]['encoder'])
-            if 'decoder' in grads["params"]:
-                orig_grads['decoder'] = jax.tree_map(lambda x: x, grads["params"]['decoder'])
-            metrics["orig_grads"] = orig_grads
-        else:
-            # When not logging gradients, just compute normally
-            grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
-                {"params": state.params},
-                pairs,
-                grid_shapes,
-                dropout_eval=False,
-                prior_kl_coeff=self.prior_kl_coeff,
-                pairwise_kl_coeff=self.pairwise_kl_coeff,
-                matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
-                matrix_size_cols=self.model.decoder.config.matrix_size_cols,
-                mode=self.train_inference_mode,
-                rngs=key,
-                **self.train_inference_kwargs,
-            )
+            
+            # Accumulate gradients
+            if grads_acc is None:
+                grads_acc = grads["params"]
+                metrics_acc = metrics
+            else:
+                grads_acc = tree_map(lambda g1, g2: g1 + g2, grads_acc, grads["params"])
+                metrics_acc = tree_map(lambda m1, m2: m1 + m2, metrics_acc, metrics)
         
-        grads = grads["params"]
-        grads = jax.lax.pmean(grads, axis_name="devices")
-        state = state.apply_gradients(grads=grads)
-        metrics.update(grad_norm=optax.global_norm(grads))
+        # Average accumulated gradients
+        grads_acc = tree_map(lambda g: g / grad_acc, grads_acc)
+        metrics_acc = tree_map(lambda m: m / grad_acc, metrics_acc)
         
-        return state, metrics
+        # Apply accumulated gradients once
+        grads_acc = jax.lax.pmean(grads_acc, axis_name="devices")
+        state = state.apply_gradients(grads=grads_acc)
+        metrics_acc.update(grad_norm=optax.global_norm(grads_acc))
+        
+        # Manually update step count
+        state = state.replace(step=state.step + 1)
+        
+        return state, metrics_acc
 
     # def train_n_steps(
     #     self, state: TrainState, batches, key: chex.PRNGKey
@@ -434,33 +429,40 @@ class Trainer:
     def train_n_steps(self, state: TrainState, batches, key: chex.PRNGKey) -> tuple[TrainState, dict]:
         num_devices, num_steps = batches[0].shape[0:2]
         keys = jax.random.split(key, (num_devices, num_steps))
-        state, metrics = self.pmap_train_steps(state, batches, keys)
         
-        # Check if we need to log gradients for this step
+        # Process each batch independently to prevent excessive memory use
+        for i in range(num_steps):
+            batch_i = tree_map(lambda x: x[:, i], batches)
+            keys_i = tree_map(lambda x: x[:, i], keys)
+            state, step_metrics = self.pmap_train_steps(state, batch_i, keys_i)
+            
+            # For the first step, initialize metrics
+            if i == 0:
+                metrics = step_metrics
+            # For later steps, accumulate metrics
+            else:
+                metrics = tree_map(lambda x, y: x + y, metrics, step_metrics)
+        
+        # Average metrics across steps
+        metrics = tree_map(lambda x: x / num_steps, metrics)
+        
+        # Process gradients only if needed
         log_gradients = getattr(self.cfg.training, "log_gradients", False)
         log_every = getattr(self.cfg.training, "log_gradients_every", 100)
         
-        if "orig_grads" in metrics and log_gradients:
-            if "step" in metrics:
-                _ = metrics.pop("step")  # Remove but don't use
-                
-            # Check if we need to log gradients for this step (using self.num_steps)
-            if self.num_steps % log_every == 0:
-                # Get first device gradients only, without copying full structure
-                device_grads = jax.tree_map(
-                    lambda x: x[0] if hasattr(x, 'shape') and len(x.shape) > 0 else x,
-                    metrics.pop("orig_grads")
-                )
-                
-                # Create visualization
-                fig = self.visualize_gradient_flow(device_grads, self.num_steps)
-                metrics["gradient_flow_fig"] = fig
-            else:
-                # Remove gradients when not visualizing to save memory
-                _ = metrics.pop("orig_grads")
+        if "orig_grads" in metrics and log_gradients and self.num_steps % log_every == 0:
+            # Process gradients with specific memory-saving technique
+            device_grads = jax.tree_map(
+                lambda x: x[0] if hasattr(x, 'shape') and len(x.shape) > 0 else x,
+                metrics.pop("orig_grads")
+            )
+            
+            # Use a memory-efficient visualization
+            fig = self.visualize_gradient_flow(device_grads, self.num_steps)
+            metrics["gradient_flow_fig"] = fig
+        elif "orig_grads" in metrics:
+            _ = metrics.pop("orig_grads")
         
-        # Mean the metrics over the devices and the n mini-batches
-        metrics = tree_map(jnp.mean, metrics)
         return state, metrics
 
     @partial(jax.jit, static_argnames=("self", "log_every_n_steps"), backend="cpu")
