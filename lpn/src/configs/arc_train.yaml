@@ -19,7 +19,7 @@ training:
   pairwise_kl_coeff: null
   mixed_precision: True  # if True, it uses bfloat16 for activations (params stay in float32)
   online_data_augmentation: True 
-  log_gradients: false 
+  log_gradients: true
   log_gradients_every: 100
   task_generator:
     num_workers: 18

@@ -19,7 +19,9 @@ from tqdm.auto import trange as tqdm_trange
 import wandb
 import hydra
 import omegaconf
+import matplotlib
 import matplotlib.pyplot as plt
+matplotlib.use('Agg') 
 import numpy as np
 
 
@@ -381,17 +383,23 @@ class Trainer:
             **self.train_inference_kwargs,
         )
         
-        # Store the original gradients for visualization
-        orig_grads = jax.tree_map(lambda x: x, grads["params"])
+        # Check if we need to capture gradients for visualization
+        log_gradients = getattr(self.cfg.training, "log_gradients", False)
+        log_every = getattr(self.cfg.training, "log_gradients_every", 100)
+        do_log_grads = log_gradients and (state.step % log_every == 0 or 
+                                        (state.step + 1) % log_every == 0)
+        
+        # Only store gradients if we're going to visualize them soon
+        if do_log_grads:
+            # Store a selective copy of gradients (only parameters we want to visualize)
+            orig_grads = jax.tree_map(lambda x: x, grads["params"])
+            metrics["orig_grads"] = orig_grads
         
         grads = grads["params"]
         grads = jax.lax.pmean(grads, axis_name="devices")
         state = state.apply_gradients(grads=grads)
         metrics.update(grad_norm=optax.global_norm(grads))
         
-        # Add the original gradients to metrics for later use
-        metrics["orig_grads"] = orig_grads
-    
         return state, metrics
 
     # def train_n_steps(
@@ -408,21 +416,26 @@ class Trainer:
         keys = jax.random.split(key, (num_devices, num_steps))
         state, metrics = self.pmap_train_steps(state, batches, keys)
         
-        # Save original gradients from the first device for visualization
-        if "orig_grads" in metrics:
+        # Check if we need to log gradients for this step
+        log_gradients = getattr(self.cfg.training, "log_gradients", False)
+        log_every = getattr(self.cfg.training, "log_gradients_every", 100)
+        
+        if "orig_grads" in metrics and log_gradients and self.num_steps % log_every == 0:
+            # Get first device gradients only, without copying full structure
             device_grads = jax.tree_map(
-                lambda x: x[0] if hasattr(x, 'shape') and len(x.shape) > 0 else x, 
+                lambda x: x[0] if hasattr(x, 'shape') and len(x.shape) > 0 else x,
                 metrics.pop("orig_grads")
             )
             
-            # Check if we should log gradient flow
-            log_gradients = getattr(self.cfg.training, "log_gradients", False)
-            log_every = getattr(self.cfg.training, "log_gradients_every", 100)
-            
-            if log_gradients and self.num_steps % log_every == 0:
-                # Visualize gradients
-                fig = self.visualize_gradient_flow(device_grads, self.num_steps)
-                metrics["gradient_flow_fig"] = fig
+            # Make a copy and delete immediately to free memory
+            fig = self.visualize_gradient_flow(device_grads, self.num_steps)
+            metrics["gradient_flow_fig"] = fig
+            # Clear the large gradient data from memory
+            device_grads = None
+        else:
+            # Remove gradients when not visualizing to save memory
+            if "orig_grads" in metrics:
+                _ = metrics.pop("orig_grads")
         
         # Mean the metrics over the devices and the n mini-batches
         metrics = tree_map(jnp.mean, metrics)
@@ -862,42 +875,51 @@ class Trainer:
         )
     
     def visualize_gradient_flow(self, grads, step):
-        """Visualize gradients and save the figure.
+        """Optimized gradient visualization with lower memory footprint"""
         
-        Args:
-            grads: The gradients dictionary
-            step: The current training step
-        
-        Returns:
-            A matplotlib figure object
-        """
-        
-        # Flatten the gradient structure
+        # Process gradients in batches to reduce peak memory
         flat_grads = []
         layer_names = []
         
-        def extract_grads(g, name):
+        def extract_grads(g, name, max_items=250):  # Limit number of items
             if isinstance(g, dict):
-                for k, v in g.items():
+                for k, v in list(g.items())[:max_items]:  # Limit dictionary items
                     extract_grads(v, f"{name}/{k}")
             elif hasattr(g, 'shape'):
-                flat_grads.append(np.abs(np.array(g)).mean())
-                layer_names.append(name)
+                # Convert to numpy immediately to free JAX memory
+                try:
+                    flat_grads.append(float(np.abs(np.array(g)).mean()))
+                    layer_names.append(name)
+                except:
+                    pass  # Skip if conversion fails
         
+        # Extract gradients with memory limits
         extract_grads(grads, "")
         
-        # Plot gradients
-        plt.figure(figsize=(12, 8))
-        plt.barh(range(len(flat_grads)), flat_grads, align='center')
-        plt.yticks(range(len(flat_grads)), layer_names)
+        # Sort by magnitude to focus on most significant gradients
+        sorted_indices = np.argsort(flat_grads)
+        significant_indices = sorted_indices[-100:]  # Keep only top 100 gradients
+        
+        # Plot only significant gradients
+        plt.figure(figsize=(10, 6), dpi=100)  # Lower DPI
+        plt.barh(range(len(significant_indices)), 
+                [flat_grads[i] for i in significant_indices], 
+                align='center')
+        plt.yticks(range(len(significant_indices)), 
+                [layer_names[i] for i in significant_indices])
         plt.xlabel('Average Gradient Magnitude')
         plt.title(f'Gradient Flow at Step {step}')
         plt.grid(True)
         plt.tight_layout()
-        os.makedirs('flows', exist_ok=True)
-        plt.savefig(f'flows/gradient_flow_step_{step}.png')
         
-        return plt.gcf()
+        # Save with lower quality to reduce file size
+        os.makedirs('flows', exist_ok=True)
+        plt.savefig(f'flows/gradient_flow_step_{step}.png', 
+                    dpi=72, bbox_inches='tight', format='png')
+        
+        fig = plt.gcf()
+        plt.close(fig)  # Close plot to free memory
+        return fig
 
 
 def instantiate_config_for_mpt(
