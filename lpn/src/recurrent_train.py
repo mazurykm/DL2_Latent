@@ -488,6 +488,14 @@ class Trainer:
         elif "orig_grads" in metrics:
             _ = metrics.pop("orig_grads")
         
+        if "gradient_flow_fig" in metrics:
+            # Explicitly save the figure to wandb
+            wandb.log({"gradient_flow": wandb.Image(metrics["gradient_flow_fig"])})
+            # Also save locally
+            print(f"Saving gradient flow figure to flows/gradient_flow_step_{self.num_steps}.png")
+            plt.savefig(f'flows/gradient_flow_step_{self.num_steps}.png')
+            plt.close(metrics["gradient_flow_fig"])
+            
         return state, metrics
 
     @partial(jax.jit, static_argnames=("self", "log_every_n_steps"), backend="cpu")
@@ -969,6 +977,7 @@ class Trainer:
         # Save with low resolution
         os.makedirs('flows', exist_ok=True)
         filename = f'flows/gradient_flow_step_{step}.png'
+        print("Saving gradient flow figure to:", filename)
         plt.savefig(filename, dpi=72, format='png', bbox_inches='tight')
         
         fig = plt.gcf()
