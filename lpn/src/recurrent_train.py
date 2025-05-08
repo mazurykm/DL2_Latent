@@ -366,6 +366,9 @@ class Trainer:
     def train_one_step(self, state: TrainState, batch, key: chex.PRNGKey) -> tuple[TrainState, dict]:
         """Memory-efficient gradient accumulation with explicit control flow."""
         grad_acc = self.gradient_accumulation_steps
+        log_gradients = getattr(self.cfg.training, "log_gradients", False)
+        log_every = getattr(self.cfg.training, "log_gradients_every", 100)
+        do_log_grads = log_gradients and (getattr(self, "num_steps", 0) % log_every == 0)
         
         # Check if batch is smaller than gradient accumulation steps
         if batch[0].shape[0] < grad_acc:
@@ -390,7 +393,64 @@ class Trainer:
             state = state.apply_gradients(grads=grads)
             metrics.update(grad_norm=optax.global_norm(grads))
             
+            # Store gradients if needed
+            if do_log_grads:
+                # Store the final gradients for visualization
+                metrics["orig_grads"] = grads
+            
             return state, metrics
+        
+        # Original code for when batch is divisible by grad_acc
+        # Split the batch into smaller chunks
+        batches = tree_map(lambda x: x.reshape(grad_acc, x.shape[0] // grad_acc, *x.shape[1:]), batch)
+        keys = jax.random.split(key, grad_acc)
+        # Initialize accumulated gradients
+        grads_acc = None
+        metrics_acc = None
+        
+        # Manually iterate instead of using scan
+        for i in range(grad_acc):
+            curr_batch = tree_map(lambda x: x[i], batches)
+            curr_key = keys[i]
+            
+            # Get gradients without accumulating in train state
+            grads, metrics = jax.grad(state.apply_fn, has_aux=True)(
+                {"params": state.params},
+                curr_batch[0],  # pairs
+                curr_batch[1],  # grid_shapes
+                dropout_eval=False,
+                prior_kl_coeff=self.prior_kl_coeff,
+                pairwise_kl_coeff=self.pairwise_kl_coeff,
+                matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
+                matrix_size_cols=self.model.decoder.config.matrix_size_cols,
+                mode=self.train_inference_mode,
+                rngs=curr_key,
+                **self.train_inference_kwargs,
+            )
+            
+            # Accumulate gradients
+            if grads_acc is None:
+                grads_acc = grads["params"]
+                metrics_acc = metrics
+            else:
+                grads_acc = tree_map(lambda g1, g2: g1 + g2, grads_acc, grads["params"])
+                metrics_acc = tree_map(lambda m1, m2: m1 + m2, metrics_acc, metrics)
+        
+        # Average accumulated gradients
+        grads_acc = tree_map(lambda g: g / grad_acc, grads_acc)
+        metrics_acc = tree_map(lambda m: m / grad_acc, metrics_acc)
+        
+        # Apply accumulated gradients once
+        grads_acc = jax.lax.pmean(grads_acc, axis_name="devices")
+        state = state.apply_gradients(grads=grads_acc)
+        metrics_acc.update(grad_norm=optax.global_norm(grads_acc))
+        
+        # Store gradients if needed
+        if do_log_grads:
+            # Store the final gradients for visualization
+            metrics_acc["orig_grads"] = grads_acc
+        
+        return state, metrics_acc
         
         # Original code for when batch is divisible by grad_acc
         # Split the batch into smaller chunks
