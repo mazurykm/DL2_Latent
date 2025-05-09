@@ -623,14 +623,14 @@ class LPN(nn.Module):
             # Standard input preparation
             flattened_input = jnp.reshape(current_input, (*current_input.shape[:-2], -1))  # (B, R*C)
             input_seq = jnp.concatenate([current_shape, flattened_input], axis=-1)
-
+            print(f"input_seq shape: {input_seq.shape}")
             # Initialize empty output_seq
             output_seq = jnp.zeros_like(input_seq).at[..., :2].set(1)
-
+            print(f"output_seq shape: {output_seq.shape}")
             # Predict grid shape first
             def grid_shape_step(output_seq: chex.Array, row: bool) -> chex.Array:
                 #print all the shapes of the tensors
-                print(f"    input_seq, output_seq, context_col shapes: {input_seq.shape}, {output_seq.shape}, {context_col.shape}", flush=True)
+                print(f"context_col shapes: {context_col.shape}", flush=True)
                 row_logits, col_logits, _ = self.decoder(input_seq, output_seq, context_col, dropout_eval)
                 if row:
                     logits = row_logits
@@ -638,16 +638,22 @@ class LPN(nn.Module):
                     logits = col_logits
                 new_token = jnp.argmax(logits, axis=-1).astype(output_seq.dtype) + 1
                 output_seq = output_seq.at[..., int(not row)].set(new_token)
+                print(f"grid shape output_seq shape: {output_seq.shape}", flush=True)
                 return output_seq
 
             output_seq = grid_shape_step(output_seq, row=True)
+            print(f"output_seq shape after row: {output_seq.shape}", flush=True)
             output_seq = grid_shape_step(output_seq, row=False)
+            print(f"output_seq shape after col: {output_seq.shape}", flush=True)
             output_shapes = output_seq[..., :2]
 
             max_cols = self.decoder.config.max_cols
 
             # Predict the actual grid values token-by-token
             def one_step(decoder: DecoderTransformer, output_seq: chex.Array, i: int):
+                print(f"one step input seq shape: {input_seq.shape}", flush=True)
+                print(f"one step output seq shape: {output_seq.shape}", flush=True)
+                print(f"one step context_col shape: {context_col.shape}", flush=True)
                 *_, grid_logits = decoder(input_seq, output_seq, context_col, dropout_eval)
                 logits_index = jnp.where(
                     (i % max_cols == 0) & (i > 0),
@@ -657,6 +663,7 @@ class LPN(nn.Module):
                 logits = jnp.take_along_axis(grid_logits, logits_index[..., None, None], axis=-2).squeeze(axis=-2)
                 new_token = jnp.argmax(logits, axis=-1).astype(output_seq.dtype)
                 output_seq = output_seq.at[..., 2 + i].set(new_token)
+                print(f"one step output seq shape 2: {output_seq.shape}", flush=True)
                 return output_seq, None
 
             output_seq, _ = nn.scan(
@@ -682,7 +689,7 @@ class LPN(nn.Module):
 
         final_output_grids = current_input
         final_output_shapes = current_shape
-
+        print(f"final_output_grids shape: {final_output_grids.shape}", flush=True)
         return final_output_grids, final_output_shapes, intermediate_outputs if save_intermediate else None
 
     def _generate_output_from_context(
