@@ -618,8 +618,8 @@ class LPN(nn.Module):
             context_col = context_matrix[..., t]   # (B, H, matrix_size_rows)
 
             # Optionally, flatten context_col to match original decoder expectation
-            context_col = jnp.reshape(context_col, (context_col.shape[0], -1))  # (B, H * matrix_size_rows)
-
+            # context_col = jnp.reshape(context_col, (context_col.shape[0], -1))  # (B, H * matrix_size_rows)
+            
             # Standard input preparation
             flattened_input = jnp.reshape(current_input, (*current_input.shape[:-2], -1))  # (B, R*C)
             input_seq = jnp.concatenate([current_shape, flattened_input], axis=-1)
