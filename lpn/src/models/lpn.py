@@ -24,7 +24,7 @@ class LPN(nn.Module):
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
-        mode: Literal["mean", "all", "random_search", "gradient_ascent"],
+        mode: Literal["mean", "all", "random_search", "gradient_ascent", "cross_attention"],
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
         **mode_kwargs,
@@ -309,6 +309,7 @@ class LPN(nn.Module):
         key: Optional[chex.PRNGKey],
         dropout_eval: bool,
         mode: Literal["mean", "first", "random_search", "gradient_ascent", "cross_attention"],
+        *,
         return_two_best: bool = False,
         **mode_kwargs,
     ):
@@ -377,19 +378,18 @@ class LPN(nn.Module):
             context = latents.mean(axis=-2)
             first_context, second_context = context, context
         elif mode == "cross_attention":
-            test_input = input[..., None, :, :]          
-            test_shape = input_grid_shape[..., None, :] 
-            test_latent = self.encoder(test_input, test_shape[..., None, :], dropout_eval)[0].squeeze(-2) 
-            query = test_latent[..., None, :] 
-            keys = latents[..., :-1, :]       
-            values = keys
-    
-            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
-            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
-            context = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
-    
-            first_context, second_context = context, context
+            test_input = jnp.stack([input, input], axis=-1)  
+            test_input = test_input[:, None] 
+            test_shape = jnp.tile(input_grid_shape[:, None, None, :], (1, 1, 2, 1)) 
 
+            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2) 
+            query = test_latent[..., None, :]  
+            keys = latents 
+            values = latents  
+            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1]) 
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
+            context = jnp.matmul(attn_weights, values).squeeze(axis=-2) 
+            first_context, second_context = context, context
         elif mode == "first":
             context = latents[..., 0, :]
             first_context, second_context = context, context
