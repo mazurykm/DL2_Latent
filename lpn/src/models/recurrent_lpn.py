@@ -90,14 +90,6 @@ class LPN(nn.Module):
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
-        elif mode == "matrix_mul":
-            context = self._compute_matrix_context(leave_one_out_latents, matrix_size_rows)
-            loss, metrics = self._loss_from_pair_and_context(
-                context, pairs, grid_shapes, dropout_eval,
-                matrix_size_cols=matrix_size_cols,
-                matrix_size_rows=matrix_size_rows
-            )
-
 
         elif mode == "cross_attention":
 
@@ -495,10 +487,6 @@ class LPN(nn.Module):
             # Reshape latents into matrices and use matrix multiplication
             context = latents.mean(axis=-2)
             first_context, second_context = context, context
-        elif mode == "matrix_mul":
-            context = self._compute_matrix_context(latents, matrix_size_rows)
-            first_context, second_context = context, context
-
         elif mode == "cross_attention":
             context = self._compute_cross_attention_context(
                 latents, matrix_size_rows=matrix_size_rows, matrix_size_cols=matrix_size_cols
