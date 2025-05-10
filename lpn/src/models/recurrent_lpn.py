@@ -88,15 +88,36 @@ class LPN(nn.Module):
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
-
-            # attention composition: 
-            #context = self._compute_cross_attention_context(
-             #   leave_one_out_latents, 
-              #  matrix_size_rows=matrix_size_rows, 
-               # matrix_size_cols=matrix_size_cols
-            #)
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
+        elif mode == "cross_attention":
+            test_inputs = pairs[..., 0] 
+            test_shapes = grid_shapes[..., 0, :] 
+
+            test_inputs = test_inputs[..., None]
+            test_shapes = test_shapes[..., None, :] 
+
+            test_latents = self.encoder(test_inputs, test_shapes, dropout_eval)[0]  
+    
+            matrix_keys = self._convert_to_matrix(matrix_size_rows, matrix_size_cols, leave_one_out_latents)
+            matrix_values = matrix_keys
+            query_matrix = self._convert_to_matrix(matrix_size_rows, matrix_size_cols, test_latents)
+
+            query_flat = query_matrix.reshape(*query_matrix.shape[:-2], -1)[..., None, :]  # (B, N, 1, D)
+            key_flat = matrix_keys.reshape(*matrix_keys.shape[:-2], -1)                    # (B, N, D)
+
+            attn_logits = jnp.einsum("bnqd,bnkd->bnqk", query_flat, key_flat) / math.sqrt(key_flat.shape[-1])  # (B, N, 1, N-1)
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  # (B, N, 1, N-1)
+
+            value_flat = matrix_values.reshape(*matrix_values.shape[:-2], -1)  # (B, N, N-1, D)
+            context = jnp.matmul(attn_weights, value_flat).squeeze(axis=-2)  # (B, N, D)
+
+            loss, metrics = self._loss_from_pair_and_context(
+                context, pairs, grid_shapes, dropout_eval,
+                matrix_size_rows=matrix_size_rows,
+                matrix_size_cols=matrix_size_cols,
+            )
+
         elif mode == "all":
             # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
             loss, metrics = jax.vmap(
@@ -485,6 +506,25 @@ class LPN(nn.Module):
             # Reshape latents into matrices and use matrix multiplication
             context = latents.mean(axis=-2)
             first_context, second_context = context, context
+        elif mode == "cross_attention":
+            test_input = input[..., None] 
+            test_shape = input_grid_shape[..., None, :]  
+
+            test_latents = self.encoder(test_input, test_shape, dropout_eval)[0] 
+            query = self._convert_to_matrix(matrix_size_rows, matrix_size_cols, test_latents)
+            keys = self._convert_to_matrix(matrix_size_rows, matrix_size_cols, latents)
+            values = keys
+
+            query_flat = query.reshape(*query.shape[:-2], -1)[..., None, :]
+            key_flat = keys.reshape(*keys.shape[:-2], -1)
+
+            attn_logits = jnp.einsum("bqd,bkd->bqk", query_flat, key_flat) / math.sqrt(key_flat.shape[-1])
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)
+            value_flat = values.reshape(*values.shape[:-2], -1)
+            context = jnp.matmul(attn_weights, value_flat).squeeze(axis=-2)
+
+            first_context, second_context = context, context
+
         elif mode == "first":
             context = latents[..., 0, :]
             first_context, second_context = context, context
@@ -1264,40 +1304,6 @@ class LPN(nn.Module):
         # make a (1,4,64)
         context = context.reshape(*context.shape[:-2], -1)
         return context
-
-    def _compute_cross_attention_context(
-        self, 
-        latents: chex.Array, 
-        matrix_size_rows: int, 
-        matrix_size_cols: int
-    ) -> chex.Array:
-        """ Cross-attend across N-1 latent matrices for each pair separately. """
-        print("\n[DEBUG] >>> _compute_cross_attention_context() called.")
-        print(f"[DEBUG] Latents shape BEFORE reshape: {latents.shape}")
-
-        batch_size, num_pairs, num_others, latent_dim = latents.shape
-        assert latent_dim == matrix_size_rows * matrix_size_cols
-
-        latents_reshaped = latents.reshape(
-        batch_size, num_pairs, num_others, matrix_size_rows, matrix_size_cols
-        )
-
-        key   = latents_reshaped.reshape(batch_size, num_pairs, num_others, -1)  # (B, N, N-1, H)
-        value = key
-
-        query = key.mean(axis=2, keepdims=True)  
-        attn_scores = jnp.einsum('bnqh,bnkh->bnqk', query, key) / jnp.sqrt(latent_dim)  # (B, N, 1, N-1)
-        attn_weights = jax.nn.softmax(attn_scores, axis=-1)                             # (B, N, 1, N-1)
-
-        attended = jnp.einsum('bnqk,bnkh->bnqh', attn_weights, value)                   # (B, N, 1, H)
-        attended = attended.squeeze(axis=2)                                             # (B, N, H)
-
-        print(f"[DEBUG] Attended context shape AFTER attention: {attended.shape}")
-
-        return attended
-
-
-
 
 
 if __name__ == "__main__":
