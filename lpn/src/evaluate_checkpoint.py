@@ -749,7 +749,7 @@ if __name__ == "__main__":
         parser.error(
             "Must provide either the json challenges (-jc) and solutions (-js) files or the dataset folder (-d)."
         )
-    if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent", "matrix", "cross_attention", "matrix_mul"]:
+    if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent", "matrix", "cross_attention"]:
         parser.error(
             "Invalid inference mode. Choose from ['mean', 'first', 'random_search', 'gradient_ascent']."
         )
