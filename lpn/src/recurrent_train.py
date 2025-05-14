@@ -64,6 +64,7 @@ class Trainer:
             )
         self.prior_kl_coeff = cfg.training.get("prior_kl_coeff")
         self.pairwise_kl_coeff = cfg.training.get("pairwise_kl_coeff")
+        self.context_kl_coeff = cfg.training.get("context_kl_coeff")
         self.train_inference_mode = cfg.training.inference_mode
         self.train_inference_kwargs = cfg.training.get("inference_kwargs") or {}
 
@@ -97,6 +98,7 @@ class Trainer:
                 dropout_eval=True,
                 prior_kl_coeff=self.prior_kl_coeff,
                 pairwise_kl_coeff=self.pairwise_kl_coeff,
+                context_kl_coeff=self.context_kl_coeff,
                 matrix_size_rows=self.model.decoder.config.matrix_size_rows,
                 matrix_size_cols=self.model.decoder.config.matrix_size_cols,
                 mode=self.train_inference_mode,
@@ -323,6 +325,7 @@ class Trainer:
             dropout_eval=False,
             prior_kl_coeff=0.0,  # dummy value for initialization
             pairwise_kl_coeff=0.0,  # dummy value for initialization
+            context_kl_coeff=0.0,  # dummy value for initialization
             matrix_size_rows=self.model.decoder.config.matrix_size_rows,
             matrix_size_cols=self.model.decoder.config.matrix_size_cols,
             mode=self.train_inference_mode,
@@ -351,6 +354,7 @@ class Trainer:
             dropout_eval=False,
             prior_kl_coeff=self.prior_kl_coeff,
             pairwise_kl_coeff=self.pairwise_kl_coeff,
+            context_kl_coeff=self.context_kl_coeff,
             matrix_size_rows=self.model.decoder.config.matrix_size_rows, 
             matrix_size_cols=self.model.decoder.config.matrix_size_cols,
             mode=self.train_inference_mode,
