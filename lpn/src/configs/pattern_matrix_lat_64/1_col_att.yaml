@@ -21,6 +21,7 @@ training:
   learning_rate: 4e-4
   prior_kl_coeff: 1e-4
   pairwise_kl_coeff: null
+  context_kl_coeff: 1e-4
   mixed_precision: False  # if True, it uses bfloat16 for activations (params stay in float32)
   online_data_augmentation: False
   task_generator:
