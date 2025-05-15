@@ -925,60 +925,71 @@ class LPN(nn.Module):
 
 
     def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:
-        # ... (implementation remains the same) ...
+        """
+        Selects the grid logits from the last non-padded column of each row.
+        This is used to prepare logits for a specific loss calculation pattern where
+        the end-of-row token's logit is effectively moved to the start-of-next-row
+        position in a flattened sequence representation.
+
+        Args:
+            grid_logits: Grid logits, shape (*S, L, V) where L is max_rows * max_cols.
+            num_cols: Number of columns for each grid, shape (*S, 1, 1).
+                      Indicates the actual width of the content in each grid.
+
+        Returns:
+            Logits from the end of each actual row (0 to max_rows-2).
+            Shape (*S, max_rows-1, V).
+        """
         max_rows, max_cols = self.decoder.config.max_rows, self.decoder.config.max_cols
-        vocab_size = grid_logits.shape[-1]
-        # B, N, R*C, V or B, R*C, V
-        original_shape = grid_logits.shape
-        leading_dims = original_shape[:-2]
-        grid_logits_reshaped = grid_logits.reshape(*leading_dims, max_rows, max_cols, vocab_size)
-        # num_cols shape needs to broadcast correctly, e.g., (*leading_dims, 1, 1)
-        num_cols_b = num_cols.astype(jnp.int32)
-        while num_cols_b.ndim < grid_logits_reshaped.ndim -1:
-            num_cols_b = num_cols_b[..., None]
+        # S = grid_logits.shape[:-2] # Leading dimensions (e.g., batch, num_pairs)
+        # V = grid_logits.shape[-1]  # Vocab size
 
+        # Ensure num_cols is int32 for indexing
+        num_cols_int = num_cols.astype(jnp.int32)
 
-        row_indices = jnp.arange(max_rows)
-        # Create indices: (batch_dims..., row_index, col_index-1)
-        col_indices = num_cols_b - 1 # Shape (*leading_dims, 1, 1) or similar
+        collected_logits = []
+        # Iterate for rows 0 to max_rows-2 (max_rows-1 iterations)
+        # The loop variable 'r_idx_plus_1' goes from 1 to max_rows-1 (inclusive).
+        # This corresponds to 0-indexed actual rows 'r = 0, ..., max_rows-2'.
+        for r_idx_plus_1 in range(1, max_rows):
+            # Current 0-indexed row
+            r = r_idx_plus_1 - 1
 
-        # Gather logits at the end of each row (excluding the last row)
-        # Use advanced indexing or jnp.take_along_axis
-        # Indices need shapes like: (*leading_dims, max_rows-1, 1, 1) for rows
-        #                          (*leading_dims, max_rows-1, 1, 1) for cols
-        row_idx_gather = jnp.arange(max_rows - 1).reshape( *((1,) * len(leading_dims)), max_rows-1, 1, 1)
+            # Calculate the 0-indexed flattened position of the last token in row 'r'
+            # Index is r * max_cols + (actual_num_cols_for_this_grid - 1)
+            # num_cols_int has shape (*S, 1, 1)
+            index_in_flat_sequence = r * max_cols + (num_cols_int - 1)
+            # index_in_flat_sequence will also have shape (*S, 1, 1)
 
-        # Need col_indices broadcastable to (*leading_dims, max_rows-1, 1, 1)
-        col_idx_gather = jnp.broadcast_to(col_indices, (*leading_dims, max_rows - 1, 1, 1))
+            # Ensure index is within bounds [0, L-1] if necessary, though typically
+            # num_cols should be <= max_cols.
+            # index_in_flat_sequence = jnp.clip(index_in_flat_sequence, 0, max_rows * max_cols - 1)
 
+            # Use take_along_axis to gather the logits
+            # grid_logits shape: (*S, L, V)
+            # index_in_flat_sequence shape: (*S, 1, 1) - needs to select from L dimension
+            # We want to select 1 logit vector per item in S, from the L dimension.
+            # axis=-2 refers to the L dimension.
+            # `indices` must be broadcastable to `arr.shape` except for `axis`.
+            # `index_in_flat_sequence` (..., 1, 1) is broadcastable to (..., 1, V)
+            # to match `grid_logits` (..., L, V) for gathering.
+            end_of_row_logit_vector = jnp.take_along_axis(
+                grid_logits,
+                index_in_flat_sequence, # Indices for the L dimension
+                axis=-2  # The sequence dimension (L)
+            )
+            # end_of_row_logit_vector will have shape (*S, 1, V)
+            collected_logits.append(end_of_row_logit_vector)
 
-        # This gather logic is complex and prone to errors. Let's rethink.
-        # The goal: for row `r`, get logits at `grid_logits[..., r, num_cols-1, :]`.
-        # We want this for rows r=0 to max_rows-2.
-        # The result should be concatenated, shape (*leading_dims, max_rows-1, V)
+        # Concatenate the (max_rows-1) collected logit vectors.
+        # Each is (*S, 1, V), concatenating on axis -2 gives (*S, max_rows-1, V).
+        if not collected_logits: # Should not happen if max_rows > 1
+            # Handle case for max_rows=1 (e.g. return empty array of correct rank)
+            leading_dims = grid_logits.shape[:-2]
+            vocab_size = grid_logits.shape[-1]
+            return jnp.empty((*leading_dims, 0, vocab_size), dtype=grid_logits.dtype)
 
-        # Alternative: Masking and Reshaping (Potentially less efficient but clearer)
-        # Create a mask (B, N, R, C) indicating the last valid column for each row
-        col_arange = jnp.arange(max_cols)
-        last_col_mask = col_arange == (num_cols_b - 1) # (*leading_dims, 1, max_cols)
-
-        # Select logits using the mask
-        # Need careful broadcasting: mask (*leading_dims, 1, max_cols, 1) vs logits (*leading_dims, max_rows, max_cols, V)
-        masked_logits = jnp.where(last_col_mask[..., None], grid_logits_reshaped, 0)
-
-        # Sum over the cols dimension to pick the single valid logit per row
-        last_logits_per_row = masked_logits.sum(axis=-2) # (*leading_dims, max_rows, V)
-
-        # Return the logits for rows 0 to max_rows-2
-        final_logits = last_logits_per_row[..., :-1, :] # (*leading_dims, max_rows-1, V)
-
-        # Reshape back to match expected output structure if needed by caller
-        # The original code expected concatenation, so shape might be (*leading_dims, (max_rows-1)*1, V)?
-        # Let's assume the caller handles the shape (*leading_dims, max_rows-1, V).
-        # If it needs (*leading_dims, max_rows-1, V), we need to reshape/flatten
-        final_logits_flat = final_logits.reshape(*leading_dims, (max_rows-1)*1, vocab_size) # Matches original intent?
-
-        return final_logits_flat # Shape (*leading_dims, max_rows-1, V)
+        return jnp.concatenate(collected_logits, axis=-2)
 
 
 # --- Dummy classes for testing if run directly ---
