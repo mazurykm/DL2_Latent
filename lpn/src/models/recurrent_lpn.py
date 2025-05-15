@@ -789,14 +789,14 @@ class LPN(nn.Module):
         return row_logits, col_logits, grid_logits, updated_input_seq
 
     def _generate_output_from_context_v2(
-        self,
-        context: chex.Array, # Single context vector (*B, H)
-        input: chex.Array,   # Input grid (*B, R, C)
-        input_grid_shape: chex.Array, # Input shape (*B, 2)
-        dropout_eval: bool,
-        matrix_size_rows: int,
-        matrix_size_cols: int,
-        save_intermediate: bool = False,
+    self,
+    context: chex.Array, # Single context vector (*B, H)
+    input: chex.Array,   # Input grid (*B, R, C)
+    input_grid_shape: chex.Array, # Input shape (*B, 2)
+    dropout_eval: bool,
+    matrix_size_rows: int,
+    matrix_size_cols: int,
+    save_intermediate: bool = False,
     ) -> tuple[chex.Array, chex.Array, Optional[dict]]:
         """
         Recurrently generates output grids using per-column context from a *single*
@@ -815,109 +815,154 @@ class LPN(nn.Module):
         max_rows, max_cols = config.max_rows, config.max_cols
         max_len = config.max_len # R * C
 
-        # Convert the single context vector into the recurrent matrix format (*B, rows, cols)
         try:
             context_matrix = self._convert_to_matrix(
                 matrix_size_rows=matrix_size_rows,
                 matrix_size_cols=matrix_size_cols,
-                latents=context, # Input context is (*B, H)
-            ) # Output shape (*B, rows, cols)
+                latents=context,
+            )
         except ValueError as e:
              print(f"Error converting context to matrix during generation: {e}")
-             # Return dummy output or raise
              dummy_grid = jnp.zeros_like(input)
              dummy_shape = jnp.ones_like(input_grid_shape)
              return dummy_grid, dummy_shape, None
 
-
-        # Initialize with the input grid and shape
         current_input_grid = input
-        current_input_shape = input_grid_shape
+        current_input_shape = input_grid_shape # Will be updated only at the end
         intermediate_outputs = {}
 
-        # --- Recurrent Generation Loop ---
         for t in range(matrix_size_cols):
-            context_col = context_matrix[..., :, t] # Context for this step (*B, rows)
+            context_col = context_matrix[..., :, t]
 
-            # Prepare input sequence for the decoder at step t
-            # Uses the *current* state (grid and shape) predicted so far
-            flattened_current_grid = jnp.reshape(current_input_grid, (*current_input_grid.shape[:-2], -1)) # (*B, R*C)
-            current_input_seq = jnp.concatenate([current_input_shape, flattened_current_grid], axis=-1) # (*B, R*C+2)
+            flattened_current_grid = jnp.reshape(current_input_grid, (*current_input_grid.shape[:-2], -1))
+            current_input_seq = jnp.concatenate([input_grid_shape, flattened_current_grid], axis=-1) # Use initial input_grid_shape here for stability
 
-            # --- Autoregressive Decoding within step t ---
-            # Initialize target sequence for prediction (start with shape tokens)
-            # We predict shape first, then grid tokens.
             target_seq_so_far = jnp.zeros(current_input_seq.shape[:-1] + (max_len + 2,), dtype=jnp.int32)
 
-            # 1. Predict Output Shape (Row and Col)
-            def predict_shape_token(target_seq, is_row_token):
-                # Decoder expects input_seq, target_seq (partially filled), context
+            def predict_shape_token(target_seq, is_row_token, current_input_seq_for_shape, context_col_for_shape, dropout_eval_for_shape):
+                # Pass self.decoder explicitly or ensure it's captured correctly by nn.scan if used here
+                # For simple shape prediction, direct call might be okay if not in a JAX transform
+                # If this is inside a jax.vmap/pmap, self.decoder itself is fine.
                 row_logits, col_logits, _ = self.decoder(
-                    current_input_seq, target_seq, context_col, dropout_eval
+                    current_input_seq_for_shape, target_seq, context_col_for_shape, dropout_eval_for_shape
                 )
                 logits = row_logits if is_row_token else col_logits
-                predicted_token = jnp.argmax(logits, axis=-1).astype(jnp.int32) + 1 # Shapes are 1-based
+                predicted_token = jnp.argmax(logits, axis=-1).astype(jnp.int32) + 1
                 token_index = 0 if is_row_token else 1
                 target_seq = target_seq.at[..., token_index].set(predicted_token)
                 return target_seq
 
-            target_seq_so_far = predict_shape_token(target_seq_so_far, is_row_token=True)
-            target_seq_so_far = predict_shape_token(target_seq_so_far, is_row_token=False)
-            predicted_output_shape = target_seq_so_far[..., :2] # (*B, 2)
+            target_seq_so_far = predict_shape_token(target_seq_so_far, True, current_input_seq, context_col, dropout_eval)
+            target_seq_so_far = predict_shape_token(target_seq_so_far, False, current_input_seq, context_col, dropout_eval)
+            predicted_output_shape_for_this_step = target_seq_so_far[..., :2]
 
-            # 2. Predict Output Grid Tokens (Autoregressively)
-            def body_fn(i, target_seq):
-                # Get grid logits based on current input and partially filled target
-                *_, grid_logits = self.decoder(
-                    current_input_seq, target_seq, context_col, dropout_eval
-                ) # grid_logits shape (*B, max_len, vocab_size)
 
-                # Select the logits corresponding to the token we are predicting *now*
-                # This uses the standard transformer causal masking logic implicitly
-                current_token_logits = grid_logits[..., i, :] # (*B, vocab_size)
-                predicted_token = jnp.argmax(current_token_logits, axis=-1).astype(jnp.int32) # (*B,)
+            # Define the body function for nn.scan
+            # The decoder is a member of LPN, so it's 'self.decoder'
+            # We need to pass the decoder as a static argument or ensure nn.scan handles it.
+            # nn.scan will correctly handle 'self' if the method is part of a nn.Module.
+            # However, _generate_output_from_context_v2 is a method of LPN, not DecoderTransformer directly.
+            # The most robust way is to make a small nn.Module to wrap the scan if decoder parameters
+            # are modified per step, or pass the decoder as a static module.
+            # Given the structure, the LPN class itself is an nn.Module.
 
-                # Update the target sequence with the predicted token
-                target_seq = target_seq.at[..., 2 + i].set(predicted_token)
-                return target_seq
+            # Let's try making the body_fn a method or ensure self is captured correctly.
+            # The `self.decoder` call needs to be handled by nn.scan's variable broadcasting.
 
-            # Use lax.scan for efficient autoregressive loop
-            final_target_seq = jax.lax.scan(
-                body_fn,
-                target_seq_so_far, # Initial state (contains predicted shape)
-                jnp.arange(max_len) # Loop indices 0 to max_len-1
-            )[0] # Get the final state (filled target sequence)
+            # Body function for nn.scan
+            def scan_body_fn(decoder_module, carry, _): # carry is target_seq_so_far
+                target_seq_prev_step = carry
+                # `i` is implicitly handled by nn.scan over xs (jnp.arange(max_len))
+                # However, nn.scan usually needs an `xs` to iterate over.
+                # If we want to just iterate max_len times, we can use None for xs
+                # and use a counter in carry, or just rely on the length of xs.
+                # Here, `i` is the current token index to predict (0 to max_len-1)
+                # We need `i` to index grid_logits, so we *do* need `xs`.
+                # The error is that `i` is not passed from `nn.scan` to `scan_body_fn`
+                # in the original `jax.lax.scan(body_fn, target_seq_so_far, jnp.arange(max_len))`
+                # Let's make `i` part of `xs`.
 
-            # --- Update State for Next Recurrent Step (t+1) ---
-            # Reshape predicted grid tokens (*B, R*C) -> (*B, R, C)
+                # Corrected: `scan_body_fn` gets `i` from `xs`
+                # def scan_body_fn(decoder_module, carry, i): # carry is target_seq_so_far
+                # target_seq_prev_step = carry
+                # current_token_idx = i # This `i` comes from `xs`
+
+                # _, _, grid_logits = decoder_module( # Use passed decoder_module
+                #     current_input_seq, target_seq_prev_step, context_col, dropout_eval
+                # )
+                # current_token_logits = grid_logits[..., current_token_idx, :]
+                # predicted_token = jnp.argmax(current_token_logits, axis=-1).astype(jnp.int32)
+                # target_seq_updated = target_seq_prev_step.at[..., 2 + current_token_idx].set(predicted_token)
+                # return target_seq_updated, None # No per-step output needed beyond the carry
+
+                # Re-defining `scan_body_fn` to be more compatible with `nn.scan`'s expectations
+                # The first argument to the scanned function should be the module itself if `variable_broadcast='params'`
+                # and the method is part of that module. Here, `one_step_decoder` is a conceptual method.
+                pass # Placeholder, will define `DecoderStep` module below
+
+
+            # For nn.scan, it's often cleaner to define a small helper nn.Module for the step.
+            class DecoderStep(nn.Module):
+                decoder_to_use: DecoderTransformer # Pass the actual decoder instance
+                fixed_input_seq: chex.Array
+                fixed_context_col: chex.Array
+                fixed_dropout_eval: bool
+
+                @nn.compact
+                def __call__(self, target_seq_prev_step, current_token_idx_to_predict):
+                    # target_seq_prev_step is the carry
+                    # current_token_idx_to_predict comes from xs
+                    _, _, grid_logits = self.decoder_to_use(
+                        self.fixed_input_seq, target_seq_prev_step, self.fixed_context_col, self.fixed_dropout_eval
+                    )
+                    # grid_logits shape (*B, max_len, vocab_size)
+                    current_token_logits = grid_logits[..., current_token_idx_to_predict, :]
+                    predicted_token = jnp.argmax(current_token_logits, axis=-1).astype(jnp.int32)
+                    target_seq_updated = target_seq_prev_step.at[..., 2 + current_token_idx_to_predict].set(predicted_token)
+                    return target_seq_updated, None # (new_carry, per_step_output)
+
+            # Instantiate the DecoderStep module for scanning
+            # `self.decoder` is the LPN's decoder attribute
+            decoder_step_module = DecoderStep(
+                decoder_to_use=self.decoder,
+                fixed_input_seq=current_input_seq,
+                fixed_context_col=context_col,
+                fixed_dropout_eval=dropout_eval,
+                name=f"decoder_step_t{t}" # Optional: unique name for each step in the outer loop
+            )
+
+            # Use nn.scan
+            # `variable_broadcast='params'` tells Flax to correctly handle parameters of `decoder_step_module.decoder_to_use`.
+            # `split_rngs={'params': False}` means the parameters are not split/changed across scan iterations.
+            # `in_axes=(0, 0)` for (carry, x) if x is a sequence. Here, carry is 0, x (token_indices) is 0.
+            # `out_axes=0` for (final_carry, per_step_outputs).
+            final_target_seq, _ = nn.scan(
+                decoder_step_module, # The nn.Module whose __call__ will be scanned
+                variable_broadcast="params",
+                split_rngs={"params": False, "dropout": False}, # Assuming dropout key is handled globally or not split per step
+                length=max_len, # Iterate max_len times
+                # in_axes = 0, # For carry
+                # xs is jnp.arange(max_len)
+            )(target_seq_so_far, jnp.arange(max_len)) # (initial_carry, xs)
+
+
             predicted_grid_tokens = final_target_seq[..., 2:]
-            # We need the actual R, C used by the decoder config
             predicted_output_grid = jnp.reshape(predicted_grid_tokens,
                                                 (*predicted_grid_tokens.shape[:-1], max_rows, max_cols))
 
-            # Update the 'current' state to be the output of this step
             current_input_grid = predicted_output_grid
-            # Only update shape at the very end? Or at each step?
-            # Let's update shape at each step to reflect the prediction based on context_col_t
-            # current_input_shape = predicted_output_shape
-            # Original logic only updated shape at the end - let's revert to that
             if t == matrix_size_cols - 1:
-                 current_input_shape = predicted_output_shape
-            else:
-                 # Keep the original input shape or previous step's shape?
-                 # Let's keep the original input shape until the last step
-                 current_input_shape = input_grid_shape # Or keep previous predicted?
+                 current_input_shape = predicted_output_shape_for_this_step # Use the shape predicted in the last step
+            # else:
+                 # current_input_shape remains input_grid_shape as per previous logic for intermediate steps.
 
-            # Optionally save intermediate state
             if save_intermediate:
                 intermediate_outputs[t] = {
                     "grid": current_input_grid,
-                    "shape": current_input_shape, # Shape used *after* this step
+                    "shape": current_input_shape if t == matrix_size_cols - 1 else input_grid_shape,
                     "context_col": context_col,
                 }
-        # --- End Recurrent Loop ---
 
-        # Final predicted grid and shape are the state after the last step
         final_output_grids = current_input_grid
         final_output_shapes = current_input_shape
 
