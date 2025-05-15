@@ -899,22 +899,21 @@ class LPN(nn.Module):
             # Instantiate DecoderStep for nn.scan by passing its *type* and *static_args*
             # `nn.scan` will then instantiate it correctly within the compact scope.
             # `self.decoder` is the main decoder instance from the LPN model.
-            scan_module_instance = nn.scan(
+            scan_module_constructor = nn.scan(
                 DecoderStep, # Pass the class type
                 variable_broadcast="params", # Parameters of self.decoder are shared
                 split_rngs={"params": False, "dropout": False}, # Dropout is handled by dropout_eval
-                length=max_len,
-                # Static arguments for DecoderStep's constructor
-                # These are passed to DecoderStep.__init__ by nn.scan
-                # The first arg to DecoderStep is `decoder_to_use`, then `fixed_dropout_eval`
-                # We are passing self.decoder as the first one
-                # The name argument is also good practice for nn.scan with types
-                name=f"decoder_scan_t{t}"
-            )(self.decoder, dropout_eval) # Arguments for DecoderStep's __init__ (decoder_to_use, fixed_dropout_eval)
+                length=max_len
+                # REMOVED: name=f"decoder_scan_t{t}" -> This was incorrect here
+            )
+            
+            # Construct the module that will be scanned using the arguments for DecoderStep's __init__
+            # These are (decoder_to_use, fixed_dropout_eval)
+            scanned_decoder_step = scan_module_constructor(self.decoder, dropout_eval) 
             
             # Run the scan
-            (final_target_seq, _, _), _ = scan_module_instance(initial_carry_for_scan, jnp.arange(max_len)) # (initial_carry, xs)
-
+            final_scan_carry, _ = scanned_decoder_step(initial_carry_for_scan, jnp.arange(max_len)) # (initial_carry, xs)
+            final_target_seq = final_scan_carry[0] # The first element of the carry tuple is the updated target_seq
 
             predicted_grid_tokens = final_target_seq[..., 2:]
             predicted_output_grid = jnp.reshape(predicted_grid_tokens,
