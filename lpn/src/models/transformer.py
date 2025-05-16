@@ -73,7 +73,6 @@ class EncoderTransformer(nn.Module):
 
         # Position embedding block.
         if self.config.scaled_position_embeddings:
-            # ... (scaled pos embed logic - assume correct) ...
             pos_row_embed = nn.Embed(num_embeddings=1, features=config.emb_dim,dtype=config.dtype,name="pos_row_embed")(jnp.zeros(config.max_rows, dtype=jnp.uint8))
             pos_col_embed = nn.Embed(num_embeddings=1, features=config.emb_dim,dtype=config.dtype,name="pos_col_embed")(jnp.zeros(config.max_cols, dtype=jnp.uint8))
             pos_row_embeds = jnp.arange(1, config.max_rows + 1)[:, None] * pos_row_embed
@@ -86,7 +85,6 @@ class EncoderTransformer(nn.Module):
 
 
         # Colors embedding block.
-        # pairs has shape (*B, N, R, C, 2_channels)
         colors_embed = nn.Embed(
             num_embeddings=config.vocab_size,
             features=config.emb_dim,
@@ -94,44 +92,44 @@ class EncoderTransformer(nn.Module):
             name="colors_embed",
         )(pairs) # Shape: (*B, N, R, C, 2_channels, emb_dim)
 
-        # Channels embedding block.
-        channels_embed_vectors = nn.Embed( # Renamed for clarity
+        channels_embed_vectors = nn.Embed(
             num_embeddings=2,
             features=config.emb_dim,
             dtype=config.dtype,
             name="channels_embed",
         )(jnp.arange(2, dtype=jnp.uint8)) # Shape: (2, emb_dim)
 
-        # Combine all the embeddings into a sequence x
-        # colors_embed: (*B, N, R, C, 2, emb_dim)
-        # pos_embed: (R, C, 1, emb_dim) -> needs broadcasting to match colors_embed
-        # channels_embed_vectors: (2, emb_dim) -> needs broadcasting
-        
-        # Add positional embeddings (broadcasts over B, N, and channel dim)
-        x = colors_embed + pos_embed[None, None, ..., :] # pos_embed becomes (1,1,R,C,1,emb_dim)
-        
-        # Add channel embeddings (broadcasts over B, N, R, C)
-        # channels_embed_vectors[None, None, None, None, :, :] gives (1,1,1,1,2,emb_dim)
+        # Combine grid value embeddings
+        # Ensure pos_embed is broadcastable. If pairs is (B,N,R,C,2), colors_embed (B,N,R,C,2,Emb)
+        # pos_embed is (R,C,Emb). Need (1,1,R,C,1,Emb) for broadcasting if B, N are batch dims.
+        # Assuming pairs has leading batch_dims B and N.
+        # pos_embed needs to be reshaped or broadcast to match the number of leading dims of colors_embed minus 3 (R,C,Emb)
+        # If colors_embed = (B,N,R,C,2,Emb), pos_embed (R,C,Emb)
+        # We need pos_embed_b = pos_embed.reshape((1,)*(len(colors_embed.shape)-5) + colors_embed.shape[-5:-2] + (1, config.emb_dim))
+        # Simplified: for (B,N,R,C,2,Emb) and (R,C,Emb), use pos_embed[None, None, :, :, None, :]
+        x = colors_embed + pos_embed[None, None, ..., :] 
         x = x + channels_embed_vectors[None, None, None, None, :, :]
+        # x is now (*B, N, R, C, 2_channels, emb_dim)
+
+        # Flatten R, C, and 2_channels dimensions for grid values
+        leading_dims_x = x.shape[:-4]  # Captures (*B, N)
+        R_val = x.shape[-4]
+        C_val = x.shape[-3]
+        channels_val = x.shape[-2]     # This should be 2
+        emb_dim_val_x = x.shape[-1]
         
-        # Flatten the rows, columns and channels.
-        # x is now (*B, N, R, C, 2, emb_dim)
-        # Reshape to (*B, N, 2*R*C, emb_dim) by flattening R, C, and 2_channels together
-        x = jnp.reshape(x, (*x.shape[:-4], -1, x.shape[-1]))
+        flat_seq_len_x = R_val * C_val * channels_val
+        target_shape_x_flat = (*leading_dims_x, flat_seq_len_x, emb_dim_val_x)
+        x = jnp.reshape(x, target_shape_x_flat) # x is now (*B, N, 2*R*C, emb_dim)
+
 
         # Embed the grid shape tokens.
         # grid_shapes interpretation: (*B, N, channel_idx, shape_idx)
-        # channel_idx: 0 for input, 1 for output
-        # shape_idx: 0 for num_rows, 1 for num_cols
+        input_rows_tok = grid_shapes[..., 0, 0] - 1
+        input_cols_tok = grid_shapes[..., 0, 1] - 1
+        output_rows_tok = grid_shapes[..., 1, 0] - 1
+        output_cols_tok = grid_shapes[..., 1, 1] - 1
 
-        # Input shape tokens
-        input_rows_tok = grid_shapes[..., 0, 0] - 1  # (*B, N)
-        input_cols_tok = grid_shapes[..., 0, 1] - 1  # (*B, N)
-        # Output shape tokens
-        output_rows_tok = grid_shapes[..., 1, 0] - 1 # (*B, N)
-        output_cols_tok = grid_shapes[..., 1, 1] - 1 # (*B, N)
-
-        # Shared Embedders for row counts and col counts
         grid_shape_row_embedder = nn.Embed(
             num_embeddings=config.max_rows, features=config.emb_dim, dtype=config.dtype, name="grid_shape_row_token_embed"
         )
@@ -139,49 +137,40 @@ class EncoderTransformer(nn.Module):
             num_embeddings=config.max_cols, features=config.emb_dim, dtype=config.dtype, name="grid_shape_col_token_embed"
         )
 
-        emb_input_rows = grid_shape_row_embedder(input_rows_tok)    # (*B, N, emb_dim)
-        emb_input_cols = grid_shape_col_embedder(input_cols_tok)    # (*B, N, emb_dim)
-        emb_output_rows = grid_shape_row_embedder(output_rows_tok)  # (*B, N, emb_dim)
-        emb_output_cols = grid_shape_col_embedder(output_cols_tok)  # (*B, N, emb_dim)
+        emb_input_rows = grid_shape_row_embedder(input_rows_tok)
+        emb_input_cols = grid_shape_col_embedder(input_cols_tok)
+        emb_output_rows = grid_shape_row_embedder(output_rows_tok)
+        emb_output_cols = grid_shape_col_embedder(output_cols_tok)
 
-        # Add respective channel embeddings
-        emb_input_rows  += channels_embed_vectors[0] # Adds (emb_dim,)
+        emb_input_rows  += channels_embed_vectors[0]
         emb_input_cols  += channels_embed_vectors[0]
         emb_output_rows += channels_embed_vectors[1]
         emb_output_cols += channels_embed_vectors[1]
         
-        # Concatenate to form the 4 shape tokens for the sequence per (Batch, N_pair)
-        # Desired order for sequence: [InRows, InCols, OutRows, OutCols] then x (grid tokens)
-        # Each is (*B, N, emb_dim). Stack to (*B, N, 4, emb_dim).
         grid_shapes_embed_sequence = jnp.stack(
             [emb_input_rows, emb_input_cols, emb_output_rows, emb_output_cols],
-            axis=-2 # Creates the new dimension of size 4
+            axis=-2 
         ) # Shape: (*B, N, 4, emb_dim)
         
-        # Concatenate with grid value embeddings
-        # x is (*B, N, 2*R*C, emb_dim)
-        # grid_shapes_embed_sequence is (*B, N, 4, emb_dim)
+        # Concatenate shape embeddings with grid value embeddings
+        # grid_shapes_embed_sequence: (*B, N, 4, emb_dim)
+        # x: (*B, N, 2*R*C, emb_dim)
+        # Both should now be 4D if B is a single batch dim.
         x = jnp.concatenate([grid_shapes_embed_sequence, x], axis=-2)  # (*B, N, 4 + 2*R*C, emb_dim)
 
         # Add the cls token.
-        # cls_token needs to be (*B, N, 1, emb_dim)
         cls_token_embedder = nn.Embed(
             num_embeddings=1, features=config.emb_dim, dtype=config.dtype, name="cls_token"
         )
-        # Create zeros with the batch and N dimensions of x
-        cls_idx = jnp.zeros_like(x[..., 0:1, 0], dtype=jnp.uint8) # (*B, N, 1)
-        cls_token = cls_token_embedder(cls_idx) # (*B, N, 1, emb_dim)
+        cls_idx = jnp.zeros_like(x[..., 0:1, 0], dtype=jnp.uint8) 
+        cls_token = cls_token_embedder(cls_idx)
 
-        x = jnp.concatenate([cls_token, x], axis=-2)  # (*B, N, 1 + 4 + 2*R*C, emb_dim)
+        x = jnp.concatenate([cls_token, x], axis=-2)
         
-        # The assert was for a single N (pairs.shape[-4] was number of pairs for one task)
-        # Now, pairs has N in it already.
-        # The sequence length T = 1 (CLS) + 4 (shapes) + 2*R*C (input_grid_flat + output_grid_flat)
-        # config.max_len is R*C
         expected_seq_len = 1 + 4 + 2 * config.max_len
-        assert x.shape[-2] == expected_seq_len, f"Seq len mismatch: {x.shape[-2]} vs {expected_seq_len}"
+        assert x.shape[-2] == expected_seq_len, f"Seq len mismatch: {x.shape[-2]} vs {expected_seq_len}. Full shape: {x.shape}"
         
-        x = nn.Dropout(rate=config.transformer_layer.dropout_rate, name="embed_dropout")(x, deterministic=dropout_eval) # Use deterministic
+        x = nn.Dropout(rate=config.transformer_layer.dropout_rate, name="embed_dropout")(x, deterministic=dropout_eval)
         return x
 
     def make_pad_mask(self, grid_shapes: chex.Array) -> chex.Array:
