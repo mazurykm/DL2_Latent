@@ -2,7 +2,7 @@
 
 training:
   seed: 0
-  resume_from_checkpoint: alisia-baielli/ARC/64dim_2col_param_att--checkpoint:latest  # null to start from scratch
+  resume_from_checkpoint: alisia-baielli/ARC/ethereal-puddle-269--checkpoint:latest  # null to start from scratch
   inference_mode: attention_params  # mean, all, random_search, gradient_ascent
   inference_kwargs:
     num_steps: 1
