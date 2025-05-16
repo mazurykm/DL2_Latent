@@ -2,8 +2,8 @@
 
 training:
   seed: 0
-  resume_from_checkpoint: alisia-baielli/ARC/crisp-wildflower-266--checkpoint:latest  # null to start from scratch
-  inference_mode: attention_params  # mean, all, random_search, gradient_ascent
+  resume_from_checkpoint: null  # null to start from scratch
+  inference_mode: direct_sample  # mean, all, random_search, gradient_ascent
   inference_kwargs:
     num_steps: 1
     lr: 0.1
@@ -14,14 +14,14 @@ training:
   log_gradients_every: 100
   batch_size: 128  # this has to be divisible by gradient_accumulation_steps * num_devices
   gradient_accumulation_steps: 32  # the higher the slower but the lower memory usage while keeping effective batch size constant
-  total_num_steps: 15000
+  total_num_steps: 6000
   log_every_n_steps: 100  # this has to respect dataset_size >= batch_size * log_every_n_steps
   eval_every_n_logs: 3 #3  # null to disable eval
   save_checkpoint_every_n_logs: 10  # null to disable checkpointing
   learning_rate: 4e-4
   prior_kl_coeff: 1e-4
   pairwise_kl_coeff: null
-  context_kl_coeff: 1e-4
+  program_kl_coeff: 1e-4
   mixed_precision: False  # if True, it uses bfloat16 for activations (params stay in float32)
   online_data_augmentation: False
   task_generator:
@@ -38,13 +38,45 @@ eval:
     - generator: PATTERN
       task_generator_kwargs:
         pattern_size: ${training.task_generator.pattern_size}
-      name: pattern_recurrent_mean
+      name: pattern_mean_program_params
       num_pairs: 4
       length: 48
       batch_size: 16
       num_tasks_to_show: 48
-      inference_mode: attention_params
-
+      inference_mode: mean_program_params
+    - generator: PATTERN
+      task_generator_kwargs:
+        pattern_size: ${training.task_generator.pattern_size}
+      name: pattern_cross_attention_multi_sample
+      num_pairs: 4
+      length: 48
+      batch_size: 16
+      num_tasks_to_show: 48
+      inference_mode: cross_attention_multi_sample
+    - generator: PATTERN
+      task_generator_kwargs:
+        pattern_size: ${training.task_generator.pattern_size}
+      name: pattern_random_search
+      num_pairs: 4
+      length: 48
+      batch_size: 16
+      num_tasks_to_show: 48
+      inference_mode: random_search
+      inference_kwargs:
+        num_samples: 50
+    - generator: PATTERN
+      task_generator_kwargs:
+        pattern_size: ${training.task_generator.pattern_size}
+      name: pattern_recurrent_ga
+      num_pairs: 4
+      length: 48
+      batch_size: 16
+      num_tasks_to_show: 48
+      inference_mode: recurrent_ga
+      inference_kwargs:
+        num_steps: 10
+        lr: 0.1
+      
   json_datasets:
 
 

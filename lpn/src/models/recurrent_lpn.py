@@ -4,8 +4,6 @@ from typing import Literal, Optional
 import math
 from functools import partial
 import os
-import matplotlib.pyplot as plt
-import uuid
 
 import chex
 from flax import linen as nn
@@ -19,6 +17,23 @@ from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.models.utils import EncoderTransformerConfig, DecoderTransformerConfig
 from src.data_utils import make_leave_one_out
 
+# Define DecoderStep globally for use in @nn.compact methods
+class DecoderStep(nn.Module):
+    decoder_to_use: DecoderTransformer
+    fixed_dropout_eval: bool
+
+    @nn.compact
+    def __call__(self, carry, scan_input):
+        target_seq_prev_step, fixed_input_seq, fixed_context_col = carry
+        current_token_idx_to_predict = scan_input
+        _, _, grid_logits = self.decoder_to_use(
+            fixed_input_seq, target_seq_prev_step, fixed_context_col, self.fixed_dropout_eval
+        )
+        current_token_logits = grid_logits[..., current_token_idx_to_predict, :]
+        predicted_token = jnp.argmax(current_token_logits, axis=-1).astype(jnp.int32)
+        target_seq_updated = target_seq_prev_step.at[..., 2 + current_token_idx_to_predict].set(predicted_token)
+        new_carry = (target_seq_updated, fixed_input_seq, fixed_context_col)
+        return new_carry, None
 
 class LPN(nn.Module):
     encoder: EncoderTransformer
@@ -29,204 +44,209 @@ class LPN(nn.Module):
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
-        matrix_size_rows: jnp.int32, #new
-        matrix_size_cols: jnp.int32, #new
-        mode: Literal["mean", "all", "random_search", "gradient_ascent", "matrix", "cross_attention", "attention_params", "recurrent_ga"], # Added new modes
+        matrix_size_rows: jnp.int32, # Added for recurrent GA and matrix mode
+        matrix_size_cols: jnp.int32, # Added for recurrent GA and matrix mode
+        mode: Literal["direct_sample", "mean_sample", "cross_attention_sample", "matrix", "recurrent_ga", "random_search"], # Added random_search
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
-        context_kl_coeff: Optional[float] = None, # New coefficient for attention_params mode
+        program_kl_coeff: Optional[float] = None,
         **mode_kwargs,
     ):
-        """
-        Forward pass of the LPN model.
+        assert pairs.shape[-4] > 1, f"Number of pairs > 1 required, got {pairs.shape[-4]}."
+        latents_mu_all, latents_logvar_all = self.encoder(pairs, grid_shapes, dropout_eval)
 
-        Args:
-            pairs: input data as tokens. Shape (*B, N, R, C, 2).
-            grid_shapes: shapes of the grids. Shape (*B, N, 2, 2).
-            dropout_eval: if false dropout is applied otherwise it is not.
-            matrix_size_rows: number of rows for matrix reshaping.
-            matrix_size_cols: number of columns for matrix reshaping.
-            mode: mode of the forward pass.
-                - "mean": Use mean of N-1 latents.
-                - "cross_attention": Use attention-weighted average of N-1 sampled latents (query=mean).
-                - "attention_params": Use attention to combine N-1 latent *parameters* (query=target mu), then sample context.
-                - "recurrent_ga": Use recurrent gradient ascent.
-                # ... other modes
-            prior_kl_coeff: KL divergence coefficient for the *original* latents vs prior.
-            pairwise_kl_coeff: KL divergence coefficient for pairwise KL between *original* latents.
-            context_kl_coeff: KL divergence coefficient for the *combined context* distribution vs prior (used in 'attention_params').
-            mode_kwargs: additional keyword arguments.
-
-        Returns:
-            loss: loss value.
-            metrics: dictionary of metrics.
-        """
-        assert pairs.shape[-4] > 1, f"Number of pairs should be greater than 1 for leave-one-out strategies, got {pairs.shape[-4]}."
-        latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval) # (*B, N, H)
-
-        # --- KL Divergence Calculations (Common) ---
         kl_metrics = {}
-        prior_kl_loss = None
-        pairwise_kl_loss = None
-        context_kl_loss = None # Specific to attention_params
+        original_prior_kl_loss = None
+        original_pairwise_kl_loss = None
+        combined_program_kl_loss = None
 
-        if latents_logvar is not None:
-            # Compute KL for original latents vs prior N(0,I)
-            prior_kl_loss = jnp.mean(
-                -0.5 * jnp.sum(1 + latents_logvar - latents_mu**2 - jnp.exp(latents_logvar), axis=-1)
+        if latents_logvar_all is None:
+            raise ValueError("VAE (latents_logvar) is required for this architecture.")
+
+        original_prior_kl_loss = jnp.mean(
+            -0.5 * jnp.sum(1 + latents_logvar_all - latents_mu_all**2 - jnp.exp(latents_logvar_all), axis=-1)
+        )
+        kl_metrics["original_prior_kl"] = original_prior_kl_loss
+        original_pairwise_kl_loss = self._compute_pairwise_gaussian_kl(latents_mu_all, latents_logvar_all).mean()
+        kl_metrics["original_pairwise_kl"] = original_pairwise_kl_loss
+        kl_metrics["latents_mu_all_mean"] = latents_mu_all.mean()
+        kl_metrics["latents_logvar_all_mean"] = latents_logvar_all.mean()
+
+        leave_one_out_mu_all = make_leave_one_out(latents_mu_all, axis=-2)
+        leave_one_out_logvar_all = make_leave_one_out(latents_logvar_all, axis=-2)
+
+        program_mu_loo, program_logvar_loo = self._compute_attention_params_context(
+            target_mu=latents_mu_all,
+            loo_mu=leave_one_out_mu_all,
+            loo_logvar=leave_one_out_logvar_all
+        )
+
+        if program_kl_coeff is not None:
+            combined_program_kl_loss = jnp.mean(
+                -0.5 * jnp.sum(1 + program_logvar_loo - program_mu_loo**2 - jnp.exp(program_logvar_loo), axis=-1)
             )
-            kl_metrics["prior_kl"] = prior_kl_loss
-            kl_metrics["latents_mu_mean"] = latents_mu.mean()
-            kl_metrics["norm_latents_mu_mean"] = norm(latents_mu, axis=-1).mean()
-            kl_metrics["latents_logvar_mean"] = latents_logvar.mean()
+            kl_metrics["combined_program_kl"] = combined_program_kl_loss
+        kl_metrics["program_mu_loo_mean"] = program_mu_loo.mean()
+        kl_metrics["program_logvar_loo_mean"] = program_logvar_loo.mean()
 
-            # Compute pairwise KL between original latent distributions
-            pairwise_kl_loss = self._compute_pairwise_gaussian_kl(latents_mu, latents_logvar).mean()
-            kl_metrics["pairwise_kl"] = pairwise_kl_loss
+        key_sample_effective_context = self.make_rng("effective_context_sample")
+        program_std_loo = jnp.exp(0.5 * program_logvar_loo)
+        initial_effective_contexts = program_mu_loo + program_std_loo * jax.random.normal(
+            key_sample_effective_context, program_mu_loo.shape
+        ) # (*B, N, H)
 
-        # Sample original latents if VAE is used
-        if latents_logvar is not None:
-            key_sample_orig = self.make_rng("latents_sample_orig")
-            latents_std = jnp.exp(0.5 * latents_logvar)
-            latents = latents_mu + latents_std * jax.random.normal(key_sample_orig, latents_mu.shape)
-        else:
-            latents = latents_mu # Use mean directly if no VAE
+        effective_contexts = None
 
-        if mode_kwargs.get("remove_encoder_latents", False):
-            key_init = self.make_rng("latents_init")
-            latents = jax.random.normal(key_init, latents.shape)
-            # If removing encoder latents, VAE stats become meaningless or need recalculation based on random init
-            # For simplicity, we might zero them out or ignore them downstream if this mode is active.
-            # Let's assume they are kept for now, but be aware of the interpretation.
-
-        # --- Context Computation based on Mode ---
-        # Prepare leave-one-out versions needed for several modes
-        leave_one_out_latents = make_leave_one_out(latents, axis=-2)  # (*B, N, N-1, H)
-        if latents_logvar is not None:
-            leave_one_out_mu = make_leave_one_out(latents_mu, axis=-2) # (*B, N, N-1, H)
-            leave_one_out_logvar = make_leave_one_out(latents_logvar, axis=-2) # (*B, N, N-1, H)
-
-        # Determine context based on mode
-        if mode == "mean":
-            context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
+        if mode == "direct_sample":
+            effective_contexts = initial_effective_contexts
+        elif mode == "mean_sample":
+            effective_contexts = program_mu_loo
+        elif mode == "cross_attention_sample":
+            loo_program_samples = make_leave_one_out(initial_effective_contexts, axis=-2)
+            effective_contexts = self._compute_loo_cross_attention_context(loo_program_samples)
         elif mode == "matrix":
-            # Note: This mode doesn't inherently use leave-one-out for context *combination*,
-            # but it will use the leave-one-out structure implicitly in the loss calculation loop.
-            # The context passed to _loss_from_pair_and_context is (*B, N, H).
-            # Let's use the mean context for consistency before matrix ops in the loss function.
-            context = leave_one_out_latents.mean(axis=-2) # (*B, N, H)
-            # The matrix operation happens *inside* _loss_from_pair_and_context
-        elif mode == "cross_attention":
-            # Uses sampled latents. Query is mean(N-1 latents).
-            context = self._compute_loo_cross_attention_context(
-                 leave_one_out_latents # Input shape (*B, N, N-1, H)
-            ) # Output shape (*B, N, H)
-        elif mode == "attention_params":
-            if latents_logvar is None:
-                 raise ValueError("Mode 'attention_params' requires a VAE (latents_logvar must be present).")
-            if context_kl_coeff is None:
-                 raise ValueError("Mode 'attention_params' requires 'context_kl_coeff'.")
-
-            key_sample_context = self.make_rng("latents_sample_context")
-            # Combine parameters using attention (query=target mu)
-            context_mu, context_logvar = self._compute_attention_params_context(
-                target_mu=latents_mu, # (*B, N, H) - Used for query
-                loo_mu=leave_one_out_mu, # (*B, N, N-1, H) - Used for key, value_mu
-                loo_logvar=leave_one_out_logvar # (*B, N, N-1, H) - Used for value_logvar
-            ) # Output shapes (*B, N, H)
-
-            # Sample context from combined distribution
-            context_std = jnp.exp(0.5 * context_logvar)
-            context = context_mu + context_std * jax.random.normal(key_sample_context, context_mu.shape) # (*B, N, H)
-
-            # Compute KL divergence for the combined context distribution
-            context_kl_loss = jnp.mean(
-                -0.5 * jnp.sum(1 + context_logvar - context_mu**2 - jnp.exp(context_logvar), axis=-1)
-            )
-            kl_metrics["context_kl"] = context_kl_loss
-            kl_metrics["context_mu_mean"] = context_mu.mean()
-            kl_metrics["context_logvar_mean"] = context_logvar.mean()
-
+            effective_contexts = initial_effective_contexts
         elif mode == "recurrent_ga":
-            # ... (recurrent_ga logic remains the same) ...
-            for arg in ["num_steps", "lr"]:
+            for arg in ["num_steps", "lr"]: # GA specific args
                 assert arg in mode_kwargs, f"'{arg}' argument required for 'recurrent_ga' mode."
-            if mode_kwargs.get("random_perturbation", None) is not None:
-                key_ga_pert = self.make_rng("gradient_ascent_random_perturbation")
-            else:
-                key_ga_pert = None
-            leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)
-            leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)
-            context, _ = self._get_recurrent_ga_context(
-                leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key_ga_pert,
-                matrix_size_rows=matrix_size_rows,
-                matrix_size_cols=matrix_size_cols,
-                **mode_kwargs
-            ) # Output shape (*B, N, H)
+            key_ga = self.make_rng("recurrent_ga_optim")
+            
+            # For __call__, GA optimizes each of the N contexts independently
+            # using its corresponding single pair.
+            # vmap _optimize_context_recurrently over the N dimension.
+            # _optimize_context_recurrently will take:
+            #   initial_context_for_one_pair (*B,H)
+            #   single_pair_data (*B, R,C,2)
+            #   single_grid_shape_data (*B, 2,2)
+            #   other_ga_params
+
+            # To vmap over pairs and initial_contexts:
+            # initial_effective_contexts: (*B, N, H)
+            # pairs: (*B, N, R, C, 2)
+            # grid_shapes: (*B, N, 2, 2)
+            # We want to call optimize for each of the N items.
+            # So, vmap over axis 1 (the N dimension) for these inputs.
+
+            partial_optimize_fn = partial(self._optimize_context_recurrently_for_loss,
+                                          matrix_size_rows=matrix_size_rows,
+                                          matrix_size_cols=matrix_size_cols,
+                                          dropout_eval=dropout_eval, # Fixed for GA opt
+                                          **mode_kwargs)
+            
+            # JAX's vmap maps over the leading axis by default.
+            # To map over axis 1 (N dim), we can transpose, vmap, then transpose back,
+            # or write the vmapped function more carefully.
+            # Let's try to make inputs suitable for direct vmap over N.
+            # If initial_effective_contexts is (B, N, H), pairs is (B, N, ...),
+            # we want to map (B, H)_i with (B, ...)_i.
+            # This means the vmapped function should expect inputs without the N dim.
+
+            # Transpose B and N for easier vmapping over N
+            # (N, B, H), (N, B, R,C,2), (N, B, 2,2)
+            transposed_initial_contexts = jnp.moveaxis(initial_effective_contexts, -2, 0)
+            transposed_pairs = jnp.moveaxis(pairs, -2, 0)
+            transposed_grid_shapes = jnp.moveaxis(grid_shapes, -2, 0)
+            
+            # If key_ga needs to be different per optimization, split it N times.
+            # For now, assume same base key or handle inside optimize if needed.
+            # key_ga_n = jax.random.split(key_ga, pairs.shape[-4]) # (N, *B_keyshape)
+
+            # vmap over the first dimension (originally N)
+            # The function `partial_optimize_fn` expects (*B,H), (*B,R,C,2), (*B,2,2)
+            vmapped_optimized_contexts = jax.vmap(
+                partial_optimize_fn, 
+                in_axes=(0, 0, 0, None) # Map over 0th axis of transposed inputs, key is None (broadcast)
+            )(transposed_initial_contexts, transposed_pairs, transposed_grid_shapes, key_ga)
+            
+            # Transpose back: (B, N, H)
+            effective_contexts = jnp.moveaxis(vmapped_optimized_contexts, 0, -2)
+
+        elif mode == "random_search":
+            # In __call__, random search optimizes a context for *each* of the N examples,
+            # using the *other N-1 examples* as support for evaluation.
+            # This matches the original LPN's random search during training.
+            for arg in ["num_samples", "scale"]:
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'random_search' training mode."
+            key_rs = self.make_rng("random_search_call")
+            
+            # leave_one_out_latents (here, use initial_effective_contexts as base for search)
+            # The search will be for *each* of the N examples.
+            # The "latents" for _get_random_search_context_original are the N-1 other effective contexts.
+            
+            # This is tricky. The original _get_random_search_context took leave_one_out_latents (*B,N,N-1,H)
+            # and leave_one_out_pairs (*B,N,N-1,...).
+            # We need to decide what "latents" _get_random_search_context_original operates on.
+            # Option 1: It operates on samples from the N-1 other `program_mu_loo`.
+            # Option 2: It operates on the `initial_effective_contexts` that were already sampled.
+            
+            # Let's use `initial_effective_contexts` as the base.
+            loo_initial_effective_contexts = make_leave_one_out(initial_effective_contexts, axis=-2) # (*B,N,N-1,H)
+            loo_pairs = make_leave_one_out(pairs, axis=-4) # (*B,N,N-1,...)
+            loo_grid_shapes = make_leave_one_out(grid_shapes, axis=-3) # (*B,N,N-1,...)
+
+            # _get_random_search_context_original expects latents (*B, num_search_bases, H)
+            # and pairs/grid_shapes (*B, num_eval_pairs, ...)
+            # Here, for each of the N examples, num_search_bases are N-1, num_eval_pairs are N-1.
+            # We need to vmap this process.
+            
+            # Vmap over the N dimension
+            # Transpose B and N
+            # (N, B, N-1, H), (N, B, N-1,...), (N, B, N-1,...)
+            transposed_loo_initial_contexts = jnp.moveaxis(loo_initial_effective_contexts, 1, 0)
+            transposed_loo_pairs = jnp.moveaxis(loo_pairs, 1, 0)
+            transposed_loo_grid_shapes = jnp.moveaxis(loo_grid_shapes, 1, 0)
+            keys_rs_n = jax.random.split(key_rs, pairs.shape[1]) # N keys
+
+            # The _get_random_search_context_original works on (B, N_search_base, H) and (B, N_eval, ...)
+            # Here, for each element of the vmap, N_search_base=N-1, N_eval=N-1.
+            vmapped_rs_contexts, _ = jax.vmap( # Second output is second_best, ignore for now
+                partial(self._get_random_search_context_original, # Use the old name
+                        matrix_size_rows=matrix_size_rows, # Pass these if needed by its loss
+                        matrix_size_cols=matrix_size_cols,
+                        dropout_eval=dropout_eval,
+                        **mode_kwargs),
+                in_axes=(0, 0, 0, 0) # vmap over N for all inputs
+            )(transposed_loo_initial_contexts, transposed_loo_pairs, transposed_loo_grid_shapes, keys_rs_n)
+
+            effective_contexts = jnp.moveaxis(vmapped_rs_contexts, 0, 1) # (B,N,H)
+
 
         else:
-            raise ValueError(f"Unsupported mode: {mode}")
+            raise ValueError(f"Unsupported mode for __call__: {mode}")
 
-        # --- Loss Calculation ---
-        # Compute reconstruction loss using the determined context
-        # The shape of 'context' is (*B, N, H) - one context vector per original pair
-        # The loss function internally handles the pairing of context[b, i] with pairs[b, i]
         loss, metrics = self._loss_from_pair_and_context(
-            context, # (*B, N, H)
-            pairs,   # (*B, N, R, C, 2)
-            grid_shapes, # (*B, N, 2, 2)
-            dropout_eval,
-            matrix_size_cols=matrix_size_cols,
-            matrix_size_rows=matrix_size_rows
-        ) # loss shape (*B, N), metrics shapes (*B, N, ...)
+            effective_contexts, pairs, grid_shapes, dropout_eval,
+            matrix_size_rows, matrix_size_cols
+        )
 
-        # --- Aggregate Metrics and Final Loss ---
-        # Calculate metrics based on relationships between latents and contexts
-        leave_one_out_contexts = make_leave_one_out(context, axis=-2) # (*B, N, N-1, H)
-        eps = 1e-5
-        # Cosine similarity between context_i and mean(context_j for j!=i)
-        mean_loo_contexts = leave_one_out_contexts.mean(axis=-2) # (*B, N, H)
-        cosine_context_vs_mean_others = jnp.einsum("...h,...h->...", context, mean_loo_contexts) / (
-            (norm(context, axis=-1) * norm(mean_loo_contexts, axis=-1)) + eps
-        )
-        # Cosine similarity between latent_i and mean(latent_j for j!=i)
-        mean_loo_latents = leave_one_out_latents.mean(axis=-2) # (*B, N, H)
-        cosine_latent_vs_mean_others = jnp.einsum("...h,...h->...", latents, mean_loo_latents) / (
-             (norm(latents, axis=-1) * norm(mean_loo_latents, axis=-1)) + eps
-        )
+        if latents_logvar_all is not None:
+            key_sample_orig_latents = self.make_rng("latents_sample_orig_for_metrics")
+            latents_std_all = jnp.exp(0.5 * latents_logvar_all)
+            original_sampled_latents = latents_mu_all + latents_std_all * jax.random.normal(
+                key_sample_orig_latents, latents_mu_all.shape
+            )
+        else:
+            original_sampled_latents = latents_mu_all
 
         metrics.update(
-            latents_norm=norm(latents, axis=-1), # (*B, N)
-            context_norm=norm(context, axis=-1), # (*B, N)
-            distance_context_latents=norm(context - latents, axis=-1), # (*B, N)
-            # Compare context_i to the N-1 contexts computed for the same i (less informative now)
-            # Let's compare context_i to context_j (where j!=i) instead.
-            # distance_between_contexts=norm(context[..., None, :] - leave_one_out_contexts, axis=-1), # (*B, N, N-1)
-            # cosine_between_contexts=cosine_between_contexts, # (*B, N, N-1)
-            # Distance between latent_i and latent_j (where j!=i)
-            distance_between_latents=norm(latents[..., None, :] - leave_one_out_latents, axis=-1), # (*B, N, N-1)
-            # cosine_between_latents=cosine_between_latents # (*B, N, N-1) - Need to recalculate for i vs j
-            cosine_context_vs_mean_others = cosine_context_vs_mean_others, # (*B, N)
-            cosine_latent_vs_mean_others = cosine_latent_vs_mean_others, # (*B, N)
+            original_sampled_latents_norm=norm(original_sampled_latents, axis=-1),
+            effective_contexts_norm=norm(effective_contexts, axis=-1),
+            distance_effective_context_vs_original_sample=norm(effective_contexts - original_sampled_latents, axis=-1),
         )
+        
+        loss, metrics = tree_map(jnp.mean, (loss, metrics))
+        metrics.update(kl_metrics)
 
-        # Average loss and metrics over the N pairs dimension
-        loss, metrics = tree_map(jnp.mean, (loss, metrics)) # Average over N dim -> shapes (*B,)
-        metrics.update(kl_metrics) # Add KL metrics (already averaged or single values)
-
-        # Add KL terms to the final loss
         total_loss = loss
-        if prior_kl_loss is not None and prior_kl_coeff is not None:
-            total_loss += prior_kl_coeff * prior_kl_loss
-        if pairwise_kl_loss is not None and pairwise_kl_coeff is not None:
-            total_loss += pairwise_kl_coeff * pairwise_kl_loss
-        if context_kl_loss is not None and context_kl_coeff is not None: # Add context KL for relevant mode
-             total_loss += context_kl_coeff * context_kl_loss
+        if original_prior_kl_loss is not None and prior_kl_coeff is not None:
+            total_loss += prior_kl_coeff * original_prior_kl_loss
+        if original_pairwise_kl_loss is not None and pairwise_kl_coeff is not None:
+            total_loss += pairwise_kl_coeff * original_pairwise_kl_loss
+        if combined_program_kl_loss is not None and program_kl_coeff is not None:
+             total_loss += program_kl_coeff * combined_program_kl_loss
 
-        # Add total loss to metrics for tracking
-        metrics["total_loss_unweighted_reconstruction"] = loss # Keep track of reconstruction loss
-        metrics["total_loss_final"] = total_loss # Final loss used for optimization
-
+        metrics["total_loss_unweighted_reconstruction"] = loss
+        metrics["total_loss_final"] = total_loss
         return total_loss, metrics
 
     @staticmethod
@@ -246,9 +266,6 @@ class LPN(nn.Module):
         denom = max(1, num_pairs * (num_pairs - 1))
         kl = jnp.sum(jnp.where(jnp.eye(num_pairs) == 0, kl, 0), axis=(-1, -2)) / denom
         return kl
-
-
-    # Removed _sample_latents as its logic is now integrated into __call__
 
     def _convert_to_matrix(
         self,
@@ -275,121 +292,6 @@ class LPN(nn.Module):
         latents_reshaped = latents.reshape(static_shape)
         return latents_reshaped
 
-
-    def _loss_from_pair_and_context(
-        self,
-        context: chex.Array, # Shape (*B, N, H)
-        pairs: chex.Array,   # Shape (*B, N, R, C, 2)
-        grid_shapes: chex.Array, # Shape (*B, N, 2, 2)
-        dropout_eval: bool,
-        matrix_size_rows: int = 64,
-        matrix_size_cols: int = 1,
-    ):
-        """
-        Computes the loss for each pair given its corresponding context.
-        Applies the recurrent matrix logic internally.
-        Args:
-            context: Context vectors for each pair. Shape (*B, N, H).
-            pairs: Input/output pairs. Shape (*B, N, R, C, 2).
-            grid_shapes: Grid shapes for each pair. Shape (*B, N, 2, 2).
-            dropout_eval: Dropout evaluation mode.
-            matrix_size_rows: Rows for matrix reshaping.
-            matrix_size_cols: Columns for matrix reshaping (number of recurrent steps).
-        Returns:
-            loss: Loss value per pair. Shape (*B, N).
-            metrics: Dictionary of metrics per pair. Shape (*B, N, ...).
-        """
-        config = self.decoder.config
-
-        # Make the input and output sequences. Shapes (*B, N, R*C+2)
-        input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
-
-        # Reshape context into matrix format (*B, N, rows, cols)
-        try:
-            context_matrix = self._convert_to_matrix(
-                matrix_size_rows=matrix_size_rows,
-                matrix_size_cols=matrix_size_cols,
-                latents=context,
-            )
-        except ValueError as e:
-             print(f"Error converting context to matrix: {e}")
-             # Handle error appropriately, maybe return NaN loss or raise
-             batch_shape = context.shape[:-1] # (*B, N)
-             dummy_loss = jnp.full(batch_shape, jnp.nan)
-             dummy_metrics = tree_map(lambda x: jnp.full(batch_shape, jnp.nan),
-                                     {"shape_row_loss": 0.0, "shape_col_loss": 0.0, "grid_loss": 0.0, "total_loss": 0.0})
-             return dummy_loss, dummy_metrics
-
-
-        current_input_seq = input_seq # Start with the original input sequence
-        final_row_logits, final_col_logits, final_grid_logits = None, None, None
-
-        for t in range(matrix_size_cols):
-            # Get the context for the current column/step (*B, N, rows)
-            context_col = context_matrix[..., :, t] # Correct indexing for (..., rows, cols)
-
-            # Generate logits using the current context column and input sequence
-            # We use teacher forcing with the *true* output_seq here for loss calculation
-            row_logits, col_logits, grid_logits = self.decoder(
-                current_input_seq, # Input sequence for this step
-                output_seq,        # True target sequence (teacher forcing)
-                context_col,       # Context for this step
-                dropout_eval
-            )
-
-            # In loss calculation (teacher forcing), the input for the *next* step
-            # theoretically shouldn't depend on the prediction of the *current* step.
-            # However, if the intention of the recurrent structure is that the *effective context*
-            # changes based on intermediate states, then the `current_input_seq` might need
-            # updating based on `output_seq` or predictions if it were generation.
-            # For standard teacher-forced loss, `current_input_seq` could remain `input_seq`.
-            # Let's assume `current_input_seq` stays `input_seq` for loss calculation,
-            # matching typical transformer teacher forcing where only the target shifts.
-            # If the design intends input to evolve, this needs clarification.
-            # current_input_seq = updated_input_seq # If input needed updating based on previous step
-
-            # Store the logits from the *final* recurrent step
-            if t == matrix_size_cols - 1:
-                final_row_logits = row_logits
-                final_col_logits = col_logits
-                final_grid_logits = grid_logits
-
-        # Compute cross entropy losses using logits from the final step
-        if final_row_logits is None: # Should not happen if matrix_size_cols >= 1
-             raise ValueError("Final logits were not computed. matrix_size_cols might be 0?")
-
-        grid_shapes_row, grid_shapes_col = grid_shapes[..., 1, 0], grid_shapes[..., 1, 1] # Target output shapes
-        # -1 to shift the tokens to [0, max_rows-1]
-        one_hot_grid_shapes_row_labels = jax.nn.one_hot(grid_shapes_row - 1, config.max_rows)
-        row_loss = -jnp.sum(jax.nn.log_softmax(final_row_logits) * one_hot_grid_shapes_row_labels, axis=-1)
-
-        # -1 to shift the tokens to [0, max_cols-1]
-        one_hot_grid_shapes_col_labels = jax.nn.one_hot(grid_shapes_col - 1, config.max_cols)
-        col_loss = -jnp.sum(jax.nn.log_softmax(final_col_logits) * one_hot_grid_shapes_col_labels, axis=-1)
-
-        # Process grid logits (handle padding/wrapping)
-        last_non_padded_logits = self._get_last_non_padded_logits(
-            final_grid_logits, grid_shapes_col[..., None, None] # Use target col shape
-        )
-        final_grid_logits = final_grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
-
-        # Target grid tokens (*B, N, R*C)
-        target_grid_tokens = pairs[..., 1].reshape(*pairs.shape[:-3], -1)
-        one_hot_grid_labels = jax.nn.one_hot(target_grid_tokens, config.vocab_size)
-        grid_losses = -jnp.sum(jax.nn.log_softmax(final_grid_logits) * one_hot_grid_labels, axis=-1) # (*B, N, R*C)
-        # Normalize grid loss by actual sequence length (*B, N)
-        grid_loss = self._normalized_mean_over_sequence(grid_losses, grid_shapes_row, grid_shapes_col)
-
-        loss = row_loss + col_loss + grid_loss # Total loss per pair (*B, N)
-        metrics = {
-            "shape_row_loss": row_loss,
-            "shape_col_loss": col_loss,
-            "grid_loss": grid_loss,
-            # "total_loss": loss, # This will be added outside after KL terms
-        }
-        return loss, metrics # Return loss and metrics per pair
-
-
     def _normalized_mean_over_sequence(
         self, grid_seq: chex.Array, num_rows: chex.Array, num_cols: chex.Array
     ) -> chex.Array:
@@ -405,196 +307,7 @@ class LPN(nn.Module):
         mean_seq = jnp.sum(grid_seq, axis=-1) / (jnp.sum(grid_pad_mask, axis=-1) + 1e-5)
         return mean_seq
 
-    def generate_output(
-        self,
-        pairs: chex.Array, # Supporting examples (*B, N, R, C, 2)
-        grid_shapes: chex.Array, # Supporting examples shapes (*B, N, 2, 2)
-        input: chex.Array, # New input grid (*B, R, C)
-        input_grid_shape: chex.Array, # New input shape (*B, 2)
-        key: Optional[chex.PRNGKey], # For sampling (VAE, random search, etc.)
-        dropout_eval: bool,
-        matrix_size_rows: int,
-        matrix_size_cols: int,
-        mode: Literal["mean", "first", "random_search", "gradient_ascent", "matrix", "cross_attention", "attention_params", "recurrent_ga"], # Added modes
-        return_two_best: bool = False,
-        **mode_kwargs,
-    ):
-        """
-        Predicts the output grid given a new input and supporting examples.
-
-        Args:
-            # ... (standard args) ...
-            key: PRNG key. Required for VAE modes ('cross_attention' if VAE active, 'attention_params'),
-                 'random_search', 'gradient_ascent' (if perturbing). Shape (*B, 2) or None.
-            # ... (other args) ...
-            mode: Inference mode.
-                 - "mean": Use mean of N latents.
-                 - "cross_attention": Use attention-weighted average of N *sampled* latents (query=mean(all N)).
-                 - "attention_params": Use attention to combine N latent *parameters* (query=mean(all N mu)), then sample context.
-                 - ... (other modes) ...
-            return_two_best: If true, returns two predictions (relevant for modes like random_search/GA).
-
-        Returns:
-            # ... (standard returns) ...
-        """
-        # 1. Encode the supporting examples
-        latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval) # (*B, N, H)
-
-        # 2. Determine the single context vector(s) for generation based on mode
-        generation_context = None
-        second_context = None # For return_two_best
-        info = {}
-
-        if mode == "mean":
-            context = latents_mu.mean(axis=-2) # Average mu directly (*B, H)
-            if latents_logvar is not None:
-                 # If VAE, maybe average sampled latents? Or stick to mean mu?
-                 # Let's stick to mean mu for simplicity in 'mean' mode.
-                 pass
-            generation_context = context
-
-        elif mode == "matrix":
-             # Similar to mean, use the average latent representation before matrix ops
-             context = latents_mu.mean(axis=-2)
-             if latents_logvar is not None:
-                  # Could sample and average samples, but let's use mean mu
-                  pass
-             generation_context = context
-             # Matrix ops happen inside _generate_output_from_context_v2
-
-        elif mode == "cross_attention":
-            # Combine N *sampled* latents using attention (query = mean(all N))
-            if latents_logvar is not None:
-                assert key is not None, "'key' required for 'cross_attention' with VAE"
-                key, subkey = jax.random.split(key)
-                latents_std = jnp.exp(0.5 * latents_logvar)
-                latents = latents_mu + latents_std * jax.random.normal(subkey, latents_mu.shape) # (*B, N, H)
-            else:
-                latents = latents_mu # Use deterministic latents
-
-            # Apply attention across all N latents
-            generation_context = self._compute_global_attention_context(latents) # (*B, H)
-            info["original_latents_for_attn"] = latents
-
-        elif mode == "attention_params":
-             # Combine N *parameters* using attention (query = mean(all N mu)), then sample
-             if latents_logvar is None:
-                  raise ValueError("Mode 'attention_params' requires a VAE for generation.")
-             assert key is not None, "'key' required for 'attention_params' generation"
-
-             # Combine parameters using global attention
-             context_mu, context_logvar = self._compute_global_attention_params_context(
-                  latents_mu, latents_logvar
-             ) # (*B, H)
-
-             # Sample the final context
-             key, subkey = jax.random.split(key)
-             context_std = jnp.exp(0.5 * context_logvar)
-             generation_context = context_mu + context_std * jax.random.normal(subkey, context_mu.shape) # (*B, H)
-             info["context_mu"] = context_mu
-             info["context_logvar"] = context_logvar
-
-        elif mode == "first":
-            # Use the first latent (or its mu if VAE)
-            context = latents_mu[:, 0, :]
-            if latents_logvar is not None:
-                 # Option: sample from first latent's distribution
-                 # key, subkey = jax.random.split(key)
-                 # context_std = jnp.exp(0.5 * latents_logvar[:, 0, :])
-                 # context = latents_mu[:, 0, :] + context_std * jax.random.normal(subkey, context_std.shape)
-                 pass # Sticking to mu for simplicity in 'first' mode
-            generation_context = context
-
-        elif mode == "random_search" or mode == "gradient_ascent" or mode == "recurrent_ga":
-             # These modes require specific helper functions to find the best context(s)
-             # We assume these functions exist and return one or two contexts
-             # Example placeholder for random search:
-             if mode == "random_search":
-                  assert key is not None, "'key' required for 'random_search'"
-                  # generation_context, second_context = self._get_random_search_context(
-                  #      latents_mu, pairs, grid_shapes, key, **mode_kwargs
-                  # ) # Needs implementation matching LPN's original structure
-                  raise NotImplementedError("Random search context generation needs specific implementation.")
-             elif mode == "gradient_ascent":
-                   # generation_context, second_context = self._get_gradient_ascent_context(
-                   #     latents_mu, pairs, grid_shapes, key, **mode_kwargs
-                   # ) # Needs implementation matching LPN's original structure
-                   raise NotImplementedError("Gradient ascent context generation needs specific implementation.")
-             elif mode == "recurrent_ga":
-                  # Recurrent GA might need adaptation for generation vs training context finding
-                  # Let's assume it can produce a single best context for generation
-                  # This likely involves running the GA optimization on the support pairs
-                  # to find *one* optimized context vector.
-                  if key is not None: key, subkey_ga = jax.random.split(key)
-                  else: subkey_ga = None
-
-                  # Need to adapt _get_recurrent_ga_context for generation (input N pairs, output 1 context)
-                  # This is complex as the original recurrent_ga seems tied to the leave-one-out loss structure.
-                  # For now, let's use the mean latent as a placeholder context for recurrent_ga generation.
-                  print("Warning: 'recurrent_ga' generation context defaulting to mean latent. Needs specific implementation.")
-                  generation_context = latents_mu.mean(axis=-2)
-                  # raise NotImplementedError("Recurrent GA context generation needs specific implementation.")
-
-
-        else:
-            raise ValueError(f"Unsupported generation mode: {mode}")
-
-        # Ensure we have a context
-        if generation_context is None:
-             raise RuntimeError(f"Generation context was not set for mode {mode}")
-
-        # If only one context was found, use it for both predictions if needed
-        if second_context is None:
-            second_context = generation_context
-
-        info["context"] = generation_context # Store the primary context used
-
-        # 3. Generate output(s) using the determined context(s)
-        if return_two_best:
-            # Generate for both best and second-best contexts
-            # Note: vmap requires contexts to be stacked on a new leading dimension
-            contexts_to_generate = jnp.stack([generation_context, second_context], axis=0) # (2, *B, H)
-
-            # Need to vmap over the first dimension (0) of the context stack
-            # The function _generate_output_from_context_v2 expects context (*B, H)
-            # So we vmap it over the stack.
-            output_grids_stack, output_shapes_stack, intermediate_dict_stack = jax.vmap(
-                partial(
-                    self._generate_output_from_context_v2,
-                    # input, input_grid_shape, dropout_eval args are automatically handled by partial
-                    input=input,
-                    input_grid_shape=input_grid_shape,
-                    dropout_eval=dropout_eval,
-                    matrix_size_rows=matrix_size_rows,
-                    matrix_size_cols=matrix_size_cols,
-                    save_intermediate=mode_kwargs.get("save_intermediate_outputs", False)
-                ),
-                in_axes=0 # Vmap over the first axis of contexts_to_generate
-            )(contexts_to_generate) # Input shape (2, *B, H)
-
-            first_output_grids, second_output_grids = output_grids_stack[0], output_grids_stack[1]
-            first_output_shapes, second_output_shapes = output_shapes_stack[0], output_shapes_stack[1]
-            # Handle intermediate dicts if saved
-            intermediate_dict = None
-            if intermediate_dict_stack is not None:
-                 intermediate_dict = {"best": intermediate_dict_stack[0], "second_best": intermediate_dict_stack[1]}
-
-            return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info, intermediate_dict
-        else:
-            # Generate only for the best context
-            output_grids, output_shapes, intermediate_dict = self._generate_output_from_context_v2(
-                generation_context, # (*B, H)
-                input,
-                input_grid_shape,
-                dropout_eval,
-                matrix_size_rows,
-                matrix_size_cols,
-                mode_kwargs.get("save_intermediate_outputs", False)
-            )
-            return output_grids, output_shapes, info, intermediate_dict
-
-
-    # --- Attention Helper Functions ---
+        # --- Attention Helper Functions ---
 
     def _compute_loo_cross_attention_context(self, loo_latents: chex.Array) -> chex.Array:
         """ Computes context using attention on Leave-One-Out sampled latents.
@@ -740,26 +453,6 @@ class LPN(nn.Module):
         # Remove the query dimension. Shapes (*B, H)
         return context_mu.squeeze(axis=-2), context_logvar.squeeze(axis=-2)
 
-
-    # --- Other Helper Functions (Assumed to exist or need implementation) ---
-
-    def _get_recurrent_ga_context(self, *args, **kwargs):
-         # Original implementation - needs careful review if used for generation
-         # For now, this is only called from __call__ with loo inputs
-         raise NotImplementedError("_get_recurrent_ga_context needs implementation details from original code.")
-         # Simplified placeholder if needed:
-         # loo_latents = args[0]
-         # return loo_latents.mean(axis=-2), None # Return mean context and None for second best
-
-    # Placeholder for gradient ascent / random search context finding during generation
-    # def _get_random_search_context(self, latents, pairs, grid_shapes, key, **mode_kwargs):
-    #     # Needs implementation based on original LPN logic
-    #     raise NotImplementedError
-    # def _get_gradient_ascent_context(self, latents, pairs, grid_shapes, key, **mode_kwargs):
-    #     # Needs implementation based on original LPN logic
-    #     raise NotImplementedError
-
-
     @classmethod
     def _flatten_input_output_for_decoding(
         cls, pairs: chex.Array, grid_shapes: chex.Array
@@ -770,173 +463,29 @@ class LPN(nn.Module):
         output_seq = jnp.concatenate([grid_shapes[..., 1,:], flattened_pairs[..., 1]], axis=-1)# Use output shape grid_shapes[..., 1]
         return input_seq, output_seq
 
+    @classmethod
+    def _select_best_and_second_best_latents(
+        cls, log_probs: chex.Array, latents: chex.Array
+    ): # log_probs: (*B,CANDS), latents: (*B,CANDS,H)
+        # Argsort sorts in ascending order, so for log_probs, we want descending.
+        # Or, sort negative log_probs (losses) in ascending.
+        # If using log_probs, sort descending.
+        sorted_indices = jnp.argsort(log_probs, axis=-1)[..., ::-1] # Descending sort
 
-    def _generate_logits_from_context(
-        self,
-        context: chex.Array,
-        input_seq: chex.Array,
-        true_output_seq: chex.Array,
-        dropout_eval: bool,
-    ) -> tuple[chex.Array, chex.Array, chex.Array, chex.Array]:
-        # ... (implementation remains the same, used only internally by loss?) ...
-        # This seems specific to the original loss calculation? Let's keep it but check usage.
-        # It's NOT used by _generate_output_from_context_v2 (autoregressive generation)
-        # It IS used by the original _loss_from_pair_and_context if we revert to that logic.
-        # The refactored _loss_from_pair_and_context now calls self.decoder directly.
-        row_logits, col_logits, grid_logits = self.decoder(input_seq, true_output_seq, context, dropout_eval)
-        output_shape = true_output_seq[..., :2]
-        updated_input_seq = true_output_seq # Teacher forcing
-        return row_logits, col_logits, grid_logits, updated_input_seq
+        best_idx = sorted_indices[..., 0:1] # (*B, 1)
+        # Need to gather from latents along the CANDS dim (-2 for latents, -1 for log_probs)
+        best_context = jnp.take_along_axis(
+            latents, best_idx[..., None], axis=-2 # Add H dim for index
+        ).squeeze(axis=-2) # (*B, H)
 
-    @nn.compact # Add this decorator
-    def _generate_output_from_context_v2(
-        self,
-        context: chex.Array, # Single context vector (*B, H)
-        input: chex.Array,   # Input grid (*B, R, C)
-        input_grid_shape: chex.Array, # Input shape (*B, 2)
-        dropout_eval: bool,
-        matrix_size_rows: int,
-        matrix_size_cols: int,
-        save_intermediate: bool = False,
-    ) -> tuple[chex.Array, chex.Array, Optional[dict]]:
-        """
-        Recurrently generates output grids using per-column context from a *single*
-        input context vector. Autoregressive generation.
-        Marked as @nn.compact to allow dynamic submodule definition for nn.scan.
-        """
-        config = self.decoder.config
-        max_rows, max_cols = config.max_rows, config.max_cols
-        max_len = config.max_len
-
-        try:
-            context_matrix = self._convert_to_matrix(
-                matrix_size_rows=matrix_size_rows,
-                matrix_size_cols=matrix_size_cols,
-                latents=context,
-            )
-        except ValueError as e:
-             print(f"Error converting context to matrix during generation: {e}")
-             dummy_grid = jnp.zeros_like(input)
-             dummy_shape = jnp.ones_like(input_grid_shape)
-             return dummy_grid, dummy_shape, None
-
-        current_input_grid = input
-        # current_input_shape is updated only at the end using the last step's prediction
-        final_predicted_shape_overall = input_grid_shape # Initialize with input task shape
-        intermediate_outputs = {}
-
-        # This DecoderStep class definition must be accessible here.
-        # It can be defined globally in the file or nested if Python scoping allows.
-        # For Flax, it's often cleaner to define it outside or as a static member if possible.
-        # Let's assume it's defined at the same level as the LPN class or globally.
-        # If it's defined *inside* _generate_output_from_context_v2 (not ideal for @compact),
-        # it needs to be a plain class, not an nn.Module, and nn.scan might need careful handling.
-
-        # To work correctly with @nn.compact and nn.scan, DecoderStep should also be an nn.Module
-        # And it will be instantiated by nn.scan.
-        class DecoderStep(nn.Module):
-            # The main decoder is an attribute of LPN, not directly of DecoderStep's definition.
-            # We'll access it via `self.parent.decoder` if LPN is `self.parent`.
-            # Or, more simply, pass the main decoder module instance to nn.scan.
-            decoder_to_use: DecoderTransformer
-            fixed_dropout_eval: bool # dropout_eval is fixed per generate_output call
-
-            @nn.compact
-            def __call__(self, carry, scan_input):
-                # carry: (target_seq_prev_step, fixed_input_seq_for_decoder, fixed_context_col_for_decoder)
-                # scan_input: current_token_idx_to_predict
-                target_seq_prev_step, fixed_input_seq, fixed_context_col = carry
-                current_token_idx_to_predict = scan_input
-
-                _, _, grid_logits = self.decoder_to_use( # Call the passed decoder instance
-                    fixed_input_seq, target_seq_prev_step, fixed_context_col, self.fixed_dropout_eval
-                )
-                current_token_logits = grid_logits[..., current_token_idx_to_predict, :]
-                predicted_token = jnp.argmax(current_token_logits, axis=-1).astype(jnp.int32)
-                target_seq_updated = target_seq_prev_step.at[..., 2 + current_token_idx_to_predict].set(predicted_token)
-                
-                # New carry for next step remains the same for fixed_input_seq and fixed_context_col
-                new_carry = (target_seq_updated, fixed_input_seq, fixed_context_col)
-                return new_carry, None # (new_carry, per_step_output)
-
-
-        for t in range(matrix_size_cols):
-            context_col = context_matrix[..., :, t]
-
-            # Prepare input sequence for this recurrent step 't'
-            # For generation, current_input_grid is the output from step t-1
-            flattened_current_grid_for_step_t = jnp.reshape(current_input_grid, (*current_input_grid.shape[:-2], -1))
-            # input_grid_shape here should be the original task's input shape,
-            # as the shape prediction part predicts the *output* shape based on this.
-            current_input_seq_for_step_t = jnp.concatenate([input_grid_shape, flattened_current_grid_for_step_t], axis=-1)
-
-            # --- Predict Output Shape for this step 't' ---
-            target_seq_so_far_for_shape = jnp.zeros(current_input_seq_for_step_t.shape[:-1] + (max_len + 2,), dtype=jnp.int32)
-
-            def predict_shape_token(target_seq, is_row_token, current_input_seq, context_col_for_shape, dropout_eval_for_shape):
-                # self.decoder is accessible because _generate_output_from_context_v2 is a method of LPN
-                row_logits, col_logits, _ = self.decoder(
-                    current_input_seq, target_seq, context_col_for_shape, dropout_eval_for_shape
-                )
-                logits = row_logits if is_row_token else col_logits
-                predicted_token = jnp.argmax(logits, axis=-1).astype(jnp.int32) + 1
-                token_index = 0 if is_row_token else 1
-                target_seq = target_seq.at[..., token_index].set(predicted_token)
-                return target_seq
-
-            target_seq_so_far_for_shape = predict_shape_token(
-                target_seq_so_far_for_shape, True, current_input_seq_for_step_t, context_col, dropout_eval
-            )
-            target_seq_so_far_for_shape = predict_shape_token(
-                target_seq_so_far_for_shape, False, current_input_seq_for_step_t, context_col, dropout_eval
-            )
-            predicted_output_shape_for_this_step_t = target_seq_so_far_for_shape[..., :2] # Shape predicted at step t
-
-            # --- Autoregressive Grid Token Prediction for step 't' ---
-            # Initial carry for the inner scan
-            initial_carry_for_scan = (target_seq_so_far_for_shape, current_input_seq_for_step_t, context_col)
-            
-            # Instantiate DecoderStep for nn.scan by passing its *type* and *static_args*
-            # `nn.scan` will then instantiate it correctly within the compact scope.
-            # `self.decoder` is the main decoder instance from the LPN model.
-            scan_module_constructor = nn.scan(
-                DecoderStep, # Pass the class type
-                variable_broadcast="params", # Parameters of self.decoder are shared
-                split_rngs={"params": False, "dropout": False}, # Dropout is handled by dropout_eval
-                length=max_len
-                # REMOVED: name=f"decoder_scan_t{t}" -> This was incorrect here
-            )
-            
-            # Construct the module that will be scanned using the arguments for DecoderStep's __init__
-            # These are (decoder_to_use, fixed_dropout_eval)
-            scanned_decoder_step = scan_module_constructor(self.decoder, dropout_eval) 
-            
-            # Run the scan
-            final_scan_carry, _ = scanned_decoder_step(initial_carry_for_scan, jnp.arange(max_len)) # (initial_carry, xs)
-            final_target_seq = final_scan_carry[0] # The first element of the carry tuple is the updated target_seq
-
-            predicted_grid_tokens = final_target_seq[..., 2:]
-            predicted_output_grid = jnp.reshape(predicted_grid_tokens,
-                                                (*predicted_grid_tokens.shape[:-1], max_rows, max_cols))
-
-            # Update current_input_grid for the next outer loop iteration (t+1)
-            current_input_grid = predicted_output_grid
-            
-            # The overall final shape is taken from the prediction of the *last* recurrent step
-            if t == matrix_size_cols - 1:
-                 final_predicted_shape_overall = predicted_output_shape_for_this_step_t
-
-            if save_intermediate:
-                intermediate_outputs[t] = {
-                    "grid": current_input_grid,
-                    # Shape saved is the one predicted at this step t, which would inform step t+1 if shape was evolving
-                    "shape": predicted_output_shape_for_this_step_t,
-                    "context_col": context_col,
-                }
-
-        # final_output_grids is current_input_grid after the loop
-        # final_output_shapes is the shape predicted in the *last* step t
-        return current_input_grid, final_predicted_shape_overall, intermediate_outputs if save_intermediate else None
+        if latents.shape[-2] > 1: # If more than one candidate
+            second_best_idx = sorted_indices[..., 1:2] # (*B, 1)
+            second_best_context = jnp.take_along_axis(
+                latents, second_best_idx[..., None], axis=-2
+            ).squeeze(axis=-2)
+        else:
+            second_best_context = best_context
+        return best_context, second_best_context
 
     def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:
         """
@@ -1004,6 +553,534 @@ class LPN(nn.Module):
             return jnp.empty((*leading_dims, 0, vocab_size), dtype=grid_logits.dtype)
 
         return jnp.concatenate(collected_logits, axis=-2)
+
+    def _loss_from_pair_and_context(
+        self,
+        context: chex.Array, # Shape (*B_dims, H) or (*B_dims, N, H)
+        pairs: chex.Array,   # Shape (*B_dims, R, C, 2) or (*B_dims, N, R, C, 2)
+        grid_shapes: chex.Array, # Shape (*B_dims, 2, 2) or (*B_dims, N, 2, 2)
+        dropout_eval: bool,
+        matrix_size_rows: int, # New
+        matrix_size_cols: int, # New
+    ):
+        config = self.decoder.config
+        input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
+
+        # Ensure context has the N dimension if pairs/grid_shapes do
+        # This logic might be too simplistic if B_dims varies.
+        # Assume if pairs has N, context should too.
+        if pairs.ndim == context.ndim + 3: # pairs=(B,N,R,C,2), context=(B,H) -> needs (B,N,H)
+            context = context[:, None, :].repeat(pairs.shape[-4], axis=-2)
+        elif pairs.ndim == context.ndim + 2 and pairs.shape[-4] == context.shape[-2]: # pairs=(B,N,R,C,2), context=(B,N,H)
+            pass # Already aligned
+        elif pairs.ndim == 5 and context.ndim == 2: # pairs=(B,R,C,2), context=(B,H) - for single eval
+             pass
+        # else:
+        #     print(f"Warning: _loss_from_pair_and_context shape mismatch. Context: {context.shape}, Pairs: {pairs.shape}")
+
+
+        try:
+            context_matrix = self._convert_to_matrix(
+                matrix_size_rows=matrix_size_rows,
+                matrix_size_cols=matrix_size_cols,
+                latents=context, # Context is now correctly shaped before this call
+            )
+        except ValueError as e:
+             print(f"Error converting context to matrix in loss: {e}, context_shape={context.shape}")
+             batch_shape = context.shape[:-1] 
+             dummy_loss = jnp.full(batch_shape, jnp.nan)
+             dummy_metrics = tree_map(lambda x: jnp.full(batch_shape, jnp.nan),
+                                     {"shape_row_loss": 0.0, "shape_col_loss": 0.0, "grid_loss": 0.0})
+             return dummy_loss, dummy_metrics
+        
+        current_input_seq = input_seq
+        final_row_logits, final_col_logits, final_grid_logits = None, None, None
+
+        for t in range(matrix_size_cols):
+            context_col = context_matrix[..., :, t]
+            row_logits, col_logits, grid_logits = self.decoder(
+                current_input_seq, output_seq, context_col, dropout_eval
+            )
+            if t == matrix_size_cols - 1:
+                final_row_logits, final_col_logits, final_grid_logits = row_logits, col_logits, grid_logits
+        
+        if final_row_logits is None:
+             raise ValueError("Final logits not computed in loss.")
+
+        # grid_shapes[..., 1, 0] is output rows, grid_shapes[..., 1, 1] is output cols
+        grid_shapes_row_out, grid_shapes_col_out = grid_shapes[..., 1, 0], grid_shapes[..., 1, 1]
+        
+        one_hot_grid_shapes_row_labels = jax.nn.one_hot(grid_shapes_row_out - 1, config.max_rows)
+        row_loss = -jnp.sum(jax.nn.log_softmax(final_row_logits) * one_hot_grid_shapes_row_labels, axis=-1)
+
+        one_hot_grid_shapes_col_labels = jax.nn.one_hot(grid_shapes_col_out - 1, config.max_cols)
+        col_loss = -jnp.sum(jax.nn.log_softmax(final_col_logits) * one_hot_grid_shapes_col_labels, axis=-1)
+
+        last_non_padded_logits = self._get_last_non_padded_logits(
+            final_grid_logits, grid_shapes_col_out[..., None, None]
+        )
+        # Adjust slicing if final_grid_logits has an N dimension
+        if final_grid_logits.ndim > 3 and last_non_padded_logits.ndim == final_grid_logits.ndim-1 : # B,N,L,V vs B,N,R-1,V
+             # This part is tricky, ensure shapes match for .at[].set()
+             # If final_grid_logits is (B,N,L,V) and last_non_padded_logits is (B,N,max_rows-1,V)
+             # We need to ensure the slicing target matches the replacement shape.
+             # Original: final_grid_logits = final_grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
+             # This slice assumes last_non_padded_logits is (..., (max_rows-1)*V_or_1_if_squeezed , :) which isn't right.
+             # The original logic was: for each row k (0 to max_rows-2), the logit for token (k+1)*max_cols
+             # (start of next row) is set to logit from end of row k.
+             # `last_non_padded_logits` has shape (*S, max_rows-1, V).
+             # So, `final_grid_logits.at[..., k*max_cols + max_cols, :]` (which is `(k+1)*max_cols`)
+             # should be set by `last_non_padded_logits[..., k, :]`.
+             
+             # Let's apply this carefully
+             grid_logits_updated = final_grid_logits
+             for r_idx in range(config.max_rows - 1): # For rows 0 to max_rows-2
+                 # Logits for the start of the *next* physical row (r_idx+1)
+                 target_slice_start_idx = (r_idx + 1) * config.max_cols
+                 # Logits from the end of the *current* row (r_idx)
+                 replacement_logits = last_non_padded_logits[..., r_idx, :] # Shape (*S, V)
+                 
+                 # Expand dims if needed for broadcasting with target slice.
+                 # Target slice shape will be (*S, V)
+                 grid_logits_updated = grid_logits_updated.at[..., target_slice_start_idx, :].set(replacement_logits)
+             final_grid_logits = grid_logits_updated
+
+        else: # Simpler case, no N dim or shapes already align for broadcast set
+            final_grid_logits = final_grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
+
+
+        target_grid_tokens = pairs[..., 1].reshape(*pairs.shape[:-3], -1)
+        one_hot_grid_labels = jax.nn.one_hot(target_grid_tokens, config.vocab_size)
+        grid_losses = -jnp.sum(jax.nn.log_softmax(final_grid_logits) * one_hot_grid_labels, axis=-1)
+        grid_loss = self._normalized_mean_over_sequence(grid_losses, grid_shapes_row_out, grid_shapes_col_out)
+
+        loss = row_loss + col_loss + grid_loss
+        metrics = {
+            "shape_row_loss": row_loss, "shape_col_loss": col_loss, "grid_loss": grid_loss,
+        }
+        return loss, metrics
+
+    @nn.compact
+    def _generate_output_from_context_v2( # Renamed from original LPN file, used by self.generate_output
+        self, context: chex.Array, input: chex.Array, input_grid_shape: chex.Array,
+        dropout_eval: bool, matrix_size_rows: int, matrix_size_cols: int,
+        save_intermediate: bool = False,
+    ) -> tuple[chex.Array, chex.Array, Optional[dict]]:
+        config = self.decoder.config
+        max_rows, max_cols, max_len = config.max_rows, config.max_cols, config.max_len
+
+        try:
+            context_matrix = self._convert_to_matrix(
+                matrix_size_rows, matrix_size_cols, context
+            )
+        except ValueError as e:
+             print(f"Error converting context to matrix in generation: {e}, context_shape={context.shape}")
+             return jnp.zeros_like(input), jnp.ones_like(input_grid_shape), None
+
+        current_input_grid = input
+        final_predicted_shape_overall = input_grid_shape
+        intermediate_outputs = {}
+
+        for t in range(matrix_size_cols):
+            context_col = context_matrix[..., :, t]
+            flattened_grid_for_step_t = jnp.reshape(current_input_grid, (*current_input_grid.shape[:-2], -1))
+            # Shape prediction uses the original input_grid_shape for the task
+            current_input_seq_for_step_t = jnp.concatenate([input_grid_shape, flattened_grid_for_step_t], axis=-1)
+            
+            target_seq_for_shape = jnp.zeros(current_input_seq_for_step_t.shape[:-1] + (max_len + 2,), dtype=jnp.int32)
+
+            def predict_shape_token_gen(target_s, is_row, cur_inp_s, ctx_col, drp_eval):
+                r_logits, c_logits, _ = self.decoder(cur_inp_s, target_s, ctx_col, drp_eval)
+                logits = r_logits if is_row else c_logits
+                pred_token = jnp.argmax(logits, axis=-1).astype(jnp.int32) + 1
+                token_idx = 0 if is_row else 1
+                return target_s.at[..., token_idx].set(pred_token)
+
+            target_seq_for_shape = predict_shape_token_gen(target_seq_for_shape, True, current_input_seq_for_step_t, context_col, dropout_eval)
+            target_seq_for_shape = predict_shape_token_gen(target_seq_for_shape, False, current_input_seq_for_step_t, context_col, dropout_eval)
+            predicted_shape_this_step = target_seq_for_shape[..., :2]
+
+            initial_carry_scan = (target_seq_for_shape, current_input_seq_for_step_t, context_col)
+            
+            scan_constructor = nn.scan(
+                DecoderStep, variable_broadcast="params",
+                split_rngs={"params": False, "dropout": False}, length=max_len
+            )
+            scanned_step_module = scan_constructor(self.decoder, dropout_eval)
+            final_carry_scan, _ = scanned_step_module(initial_carry_scan, jnp.arange(max_len))
+            final_target_seq = final_carry_scan[0]
+
+            predicted_grid_tokens = final_target_seq[..., 2:]
+            current_input_grid = jnp.reshape(predicted_grid_tokens, (*predicted_grid_tokens.shape[:-1], max_rows, max_cols))
+            
+            if t == matrix_size_cols - 1:
+                final_predicted_shape_overall = predicted_shape_this_step
+            if save_intermediate:
+                intermediate_outputs[t] = {"grid": current_input_grid, "shape": predicted_shape_this_step, "context_col": context_col}
+        
+        return current_input_grid, final_predicted_shape_overall, intermediate_outputs if save_intermediate else None
+
+    def _optimize_context_recurrently_for_loss(
+        self,
+        initial_context_one_pair: chex.Array, # (*B, H)
+        single_pair_data: chex.Array,         # (*B, R, C, 2)
+        single_grid_shape_data: chex.Array,   # (*B, 2, 2)
+        key_for_optim: chex.PRNGKey,          # (*B_keyshape) or broadcastable
+        matrix_size_rows: int,
+        matrix_size_cols: int,
+        dropout_eval: bool, # Should be True for optimization
+        num_steps: int,
+        lr: float,
+        optimizer_name: str = "adam", # Changed from optimizer to optimizer_name
+        optimizer_kwargs: Optional[dict] = None,
+        **other_ga_kwargs # e.g. lr_schedule etc. from original GA
+    ):
+        """Optimizes a single context vector for a single pair using recurrent decoder."""
+        
+        # Define the loss function for gradient ascent (negative loss for maximization)
+        # It takes the context and returns scalar loss.
+        def loss_for_ga(context_to_optimize): # context_to_optimize: (*B, H)
+            # _loss_from_pair_and_context expects context potentially (*B,N,H) if N is present in pairs
+            # Here, we are optimizing for a single pair, so N=1 effectively.
+            # Reshape single_pair_data to have an N=1 dimension if _loss_from_pair_and_context expects it
+            # pairs_for_loss = single_pair_data[:, None, ...] # Not needed if loss fn handles it
+            # grid_shapes_for_loss = single_grid_shape_data[:, None, ...]
+
+            loss_val, _ = self._loss_from_pair_and_context(
+                context_to_optimize, # Pass it directly as (*B, H)
+                single_pair_data,    # Pass as (*B, R, C, 2)
+                single_grid_shape_data, # Pass as (*B, 2, 2)
+                dropout_eval,
+                matrix_size_rows,
+                matrix_size_cols
+            ) # loss_val is (*B,)
+            return loss_val.mean() # Mean over batch if B > 1, else just scalar
+
+        grad_fn = jax.value_and_grad(loss_for_ga)
+
+        if optimizer_name == "adam":
+            opt = optax.adam(lr, **(optimizer_kwargs or {}))
+        elif optimizer_name == "sgd":
+            opt = optax.sgd(lr, **(optimizer_kwargs or {}))
+        else:
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+
+        opt_state = opt.init(initial_context_one_pair)
+        current_context = initial_context_one_pair
+
+        def ga_step(carry, _):
+            ctx, opt_s = carry
+            loss_value, grads = grad_fn(ctx)
+            updates, new_opt_s = opt.update(grads, opt_s, ctx)
+            new_ctx = optax.apply_updates(ctx, updates)
+            return (new_ctx, new_opt_s), loss_value
+
+        # We need to ensure the GA step respects the @nn.compact context if self.decoder is called
+        # by grad_fn -> loss_for_ga -> _loss_from_pair_and_context -> self.decoder.
+        # Since _loss_from_pair_and_context is not @compact itself, this is tricky.
+        # The value_and_grad should be fine as long as no new Modules are init inside.
+        # The `self.decoder` call is on an existing instance.
+
+        (final_context, _), losses_over_steps = jax.lax.scan(ga_step, (current_context, opt_state), None, length=num_steps)
+        return final_context
+
+
+    def _optimize_context_recurrently_for_generation(
+        self,
+        initial_context_program: chex.Array, # (*B, H) - Single program context
+        support_pairs_all: chex.Array,        # (*B, N, R, C, 2) - All N support pairs
+        support_grid_shapes_all: chex.Array,  # (*B, N, 2, 2)
+        key_for_optim: chex.PRNGKey,
+        matrix_size_rows: int,
+        matrix_size_cols: int,
+        dropout_eval: bool, # Should be True
+        num_steps: int,
+        lr: float,
+        optimizer_name: str = "adam",
+        optimizer_kwargs: Optional[dict] = None,
+        **other_ga_kwargs
+    ):
+        """Optimizes a single program context vector using all N support pairs."""
+        
+        def loss_for_ga_gen(context_to_optimize): # context_to_optimize: (*B, H)
+            # Repeat the context_to_optimize N times to match support_pairs_all
+            context_repeated_N_times = context_to_optimize[:, None, :].repeat(
+                support_pairs_all.shape[1], axis=1
+            ) # (*B, N, H)
+            
+            loss_val_per_pair, _ = self._loss_from_pair_and_context(
+                context_repeated_N_times,
+                support_pairs_all,
+                support_grid_shapes_all,
+                dropout_eval,
+                matrix_size_rows,
+                matrix_size_cols
+            ) # loss_val_per_pair is (*B, N)
+            return loss_val_per_pair.mean() # Mean over batch and N pairs
+
+        grad_fn = jax.value_and_grad(loss_for_ga_gen)
+
+        if optimizer_name == "adam":
+            opt = optax.adam(lr, **(optimizer_kwargs or {}))
+        # ... (add sgd and error handling like above)
+        else: opt = optax.sgd(lr, **(optimizer_kwargs or {}))
+
+
+        opt_state = opt.init(initial_context_program)
+        current_context = initial_context_program
+
+        # GA scan loop (same as in _for_loss version)
+        def ga_step_gen(carry, _):
+            ctx, opt_s = carry
+            loss_value, grads = grad_fn(ctx)
+            updates, new_opt_s = opt.update(grads, opt_s, ctx)
+            new_ctx = optax.apply_updates(ctx, updates)
+            return (new_ctx, new_opt_s), loss_value
+        
+        (final_context, _), _ = jax.lax.scan(ga_step_gen, (current_context, opt_state), None, length=num_steps)
+        return final_context # Return only the optimized context
+
+
+    # --- generate_output method (incorporating recurrent_ga and random_search) ---
+    def generate_output(
+        self,
+        pairs: chex.Array, input: chex.Array, grid_shapes: chex.Array, input_grid_shape: chex.Array, # Swapped pairs and input for consistency
+        key: Optional[chex.PRNGKey], dropout_eval: bool,
+        matrix_size_rows: int, matrix_size_cols: int,
+        mode: Literal["direct_sample", "mean_program_params", "cross_attention_multi_sample", "matrix", "recurrent_ga", "random_search"],
+        return_two_best: bool = False,
+        **mode_kwargs,
+    ):
+        latents_mu_all, latents_logvar_all = self.encoder(pairs, grid_shapes, dropout_eval)
+        if latents_logvar_all is None: raise ValueError("VAE required.")
+        if key is None: raise ValueError("Key required for generation.")
+
+        key_prog_params, key_sampling, key_optim = jax.random.split(key, 3) # Split for GA/RS
+
+        program_mu, program_logvar = self._compute_global_attention_params_context(
+            latents_mu_all, latents_logvar_all
+        )
+        program_std = jnp.exp(0.5 * program_logvar)
+        info = {"program_mu": program_mu, "program_logvar": program_logvar}
+
+        initial_effective_context = program_mu + program_std * jax.random.normal(
+            key_sampling, program_mu.shape
+        ) # Base sample for some modes
+        
+        effective_context = None
+        second_effective_context = None # For random_search
+
+        if mode == "direct_sample":
+            effective_context = initial_effective_context
+        elif mode == "mean_program_params":
+            effective_context = program_mu
+        elif mode == "cross_attention_multi_sample":
+            num_samples_for_attn = mode_kwargs.get("num_samples_for_attn", 16)
+            multi_samples = program_mu[:, None, :] + program_std[:, None, :] * jax.random.normal(
+                key_sampling, (program_mu.shape[0], num_samples_for_attn, program_mu.shape[-1])
+            )
+            effective_context = self._compute_global_attention_context(multi_samples)
+            info["multi_samples_for_attn"] = multi_samples
+        elif mode == "matrix":
+            effective_context = initial_effective_context
+        elif mode == "recurrent_ga":
+            for arg in ["num_steps", "lr"]:
+                assert arg in mode_kwargs, f"GA mode requires '{arg}'"
+            effective_context = self._optimize_context_recurrently_for_generation(
+                initial_context_program=initial_effective_context, # Start from a sample
+                support_pairs_all=pairs,
+                support_grid_shapes_all=grid_shapes,
+                key_for_optim=key_optim,
+                matrix_size_rows=matrix_size_rows,
+                matrix_size_cols=matrix_size_cols,
+                dropout_eval=dropout_eval, # True for GA optimization
+                **mode_kwargs # num_steps, lr, optimizer_name, etc.
+            )
+        elif mode == "random_search":
+            # Ensure matrix_size_rows/cols are passed if _get_random_search_context_original uses them
+            effective_context, second_effective_context = self._get_random_search_context_original( # Use old name
+                latents=latents_mu_all, # Base search on original example latents
+                pairs=pairs,            # Evaluate against all N support pairs
+                grid_shapes=grid_shapes,
+                key=key_optim,
+                matrix_size_rows=matrix_size_rows,
+                matrix_size_cols=matrix_size_cols,
+                dropout_eval=dropout_eval,
+                **mode_kwargs
+            )
+
+
+        else:
+            raise ValueError(f"Unsupported generation mode: {mode}")
+
+        if effective_context is None: raise RuntimeError("Effective context not set.")
+        if return_two_best and second_effective_context is None:
+            second_effective_context = effective_context
+        
+        info["final_effective_context"] = effective_context
+        if return_two_best and mode == "random_search": # Only RS naturally provides two distinct
+             info["second_final_effective_context"] = second_effective_context
+
+        if return_two_best and mode == "random_search":
+            contexts_to_generate = jnp.stack([effective_context, second_effective_context], axis=0)
+            output_grids_stack, output_shapes_stack, intermediate_dict_stack = jax.vmap(
+                partial(self._generate_output_from_context_v2, input=input, input_grid_shape=input_grid_shape,
+                        dropout_eval=dropout_eval, matrix_size_rows=matrix_size_rows,
+                        matrix_size_cols=matrix_size_cols,
+                        save_intermediate=mode_kwargs.get("save_intermediate_outputs", False)),
+                in_axes=0
+            )(contexts_to_generate)
+            f_grids, s_grids = output_grids_stack[0], output_grids_stack[1]
+            f_shapes, s_shapes = output_shapes_stack[0], output_shapes_stack[1]
+            inter_dict = None
+            if intermediate_dict_stack is not None:
+                inter_dict = {"best": intermediate_dict_stack[0], "second_best": intermediate_dict_stack[1]}
+            return f_grids, f_shapes, s_grids, s_shapes, info, inter_dict
+        else:
+            grids, shapes, inter_dict = self._generate_output_from_context_v2(
+                effective_context, input, input_grid_shape, dropout_eval,
+                matrix_size_rows, matrix_size_cols,
+                mode_kwargs.get("save_intermediate_outputs", False)
+            )
+            if return_two_best: # For other modes, just duplicate if asked
+                return grids, shapes, grids, shapes, info, inter_dict
+            else:
+                return grids, shapes, info, inter_dict
+
+    def _get_random_search_context_original(
+        self,
+        latents: chex.Array, # These are the N example latents from encoder (*B,N,H)
+        pairs: chex.Array,   # These are the N example pairs (*B,N,R,C,2) for evaluation
+        grid_shapes: chex.Array,
+        key: chex.PRNGKey,
+        matrix_size_rows: int, # Added
+        matrix_size_cols: int, # Added
+        dropout_eval: bool,    # Added
+        num_samples: int,
+        scale: float,
+        scan_batch_size: Optional[int] = None,
+        include_mean_latent: bool = True,
+        include_all_latents: bool = False,
+        **kwargs, # e.g. grid_log_prob_weight for _compute_log_probs
+    ):
+        # `latents` here are the search base candidates: (*B, num_base, H)
+        # This might be different from the N example latents directly.
+        search_base_latents = self._prepare_latents_before_search(
+            include_mean_latent, include_all_latents, latents # latents are (*B,N,H)
+        ) # search_base_latents is (*B, num_search_bases, H)
+
+        if num_samples > 0:
+            num_base = search_base_latents.shape[-2]
+            # Ensure num_padded_samples is multiple of num_base if num_base > 0
+            if num_base > 0:
+                num_padded_samples = math.ceil(num_samples / num_base) * num_base
+                random_vectors = jax.random.normal(
+                    key,
+                    (*search_base_latents.shape[:-2], num_base, num_padded_samples // num_base, search_base_latents.shape[-1]),
+                )
+                random_latents_generated = search_base_latents[..., None, :] + scale * random_vectors
+                random_latents_generated = random_latents_generated.reshape(
+                    *random_latents_generated.shape[:-3], -1, random_latents_generated.shape[-1]
+                )[..., :num_samples, :]
+            else: # If no base latents, generate from zero or mean
+                mean_for_random = latents.mean(axis=-2, keepdims=True) # Use original mean
+                random_vectors = jax.random.normal(key, (*mean_for_random.shape[:-2], 1, num_samples, mean_for_random.shape[-1]))
+                random_latents_generated = mean_for_random[...,None,:] + scale * random_vectors
+                random_latents_generated = random_latents_generated.squeeze(axis=-3)
+
+
+            search_base_latents = jnp.concatenate([search_base_latents, random_latents_generated], axis=-2)
+
+        all_candidate_contexts = search_base_latents # Shape (*B, total_candidates, H)
+        
+        # Evaluate each candidate context against ALL N pairs
+        # For each candidate_context in all_candidate_contexts (*B,H):
+        #   loss = _loss_from_pair_and_context( expand(candidate_context, N), pairs, grid_shapes) -> (*B,N)
+        #   score = mean(loss) -> (*B,)
+        # We need scores of shape (*B, total_candidates)
+
+        def score_one_candidate(candidate_ctx_one): # (*B, H)
+            # Expand to (*B, N, H) to match `pairs`
+            ctx_expanded = candidate_ctx_one[:, None, :].repeat(pairs.shape[1], axis=1)
+            loss_all_N, _ = self._loss_from_pair_and_context(
+                ctx_expanded, pairs, grid_shapes, dropout_eval,
+                matrix_size_rows, matrix_size_cols
+            ) # (*B, N)
+            return loss_all_N.mean(axis=-1) # Score is mean loss over N pairs (*B,)
+
+        # Vmap over the `total_candidates` dimension of `all_candidate_contexts`
+        # all_candidate_contexts is (*B, total_candidates, H)
+        # We want output scores (*B, total_candidates)
+        # So vmap in_axes=-2 (candidate dim), out_axes=-1 (candidate score dim)
+        
+        # Ensure input for vmap is correct.
+        # If all_candidate_contexts = (B, C, H), then after vmap(in_axes=1),
+        # score_one_candidate gets (B,H).
+        candidate_losses = jax.vmap(score_one_candidate, in_axes=1, out_axes=1)(all_candidate_contexts)
+        # candidate_losses will be (B, total_candidates)
+        
+        # log_probs are negative losses
+        log_probs = -candidate_losses
+
+        best_context, second_best_context = self._select_best_and_second_best_latents(
+            log_probs, all_candidate_contexts
+        )
+        return best_context, second_best_context
+
+    @classmethod
+    def _prepare_latents_before_search(
+        cls,
+        include_mean_latent: bool,
+        include_all_latents: bool,
+        latents: chex.Array,
+        random_perturbation: Optional[dict] = None,
+        key: Optional[chex.PRNGKey] = None,
+    ) -> chex.Array:
+        """
+        Selects the latents from which to start the search. If include_mean_latent is True, the mean latent
+        is included in the latents from which to start the search. If include_all_latents is True, all the pair
+        latents are included in the latents from which to start the search. If both are True, the mean latent
+        is concatenated to the latents from which to start the search. If both are False, an error is raised.
+
+        Args:
+            include_mean_latent: if true, includes the mean latent in the latents from which to start the search.
+            include_all_latents: if true, includes all the pair latents in the latents from which to start the
+                search.
+            latents: latents from the encoder. Shape (*B, N, H).
+            random_perturbation: dictionary of random perturbation arguments. If not None, the following
+                arguments are required:
+                - num_samples: number of random samples to generate around the mean latent.
+                - scale: Gaussian scale of the random perturbations.
+            key: random key to generate the random perturbation. Shape (2,).
+
+        Returns:
+            latents: latents from which to start the search. Shape (*B, 1, H), (*B, N, H), or (*B, N+1, H).
+        """
+        if include_mean_latent:
+            mean_latent = latents.mean(axis=-2, keepdims=True)
+            if include_all_latents:
+                # Include the mean latent in the latents from which to start the search.
+                prep_latents = jnp.concatenate([mean_latent, latents], axis=-2)
+            else:
+                # Only start the search from the mean latent.
+                prep_latents = mean_latent
+        else:
+            # Start the search from all the pair latents.
+            if not include_all_latents:
+                raise ValueError(
+                    "At least one of 'include_mean_latent' or 'include_all_latents' should be True."
+                )
+            prep_latents = latents
+        if random_perturbation is not None:
+            assert key is not None, "'key' argument required for random perturbation."
+            for arg in ["num_samples", "scale"]:
+                assert arg in random_perturbation, f"'{arg}' argument required for random perturbation."
+            num_samples = random_perturbation["num_samples"]
+            scale = random_perturbation["scale"]
+            random_vectors = jax.random.normal(key, (*latents.shape[:-2], num_samples, latents.shape[-1]))
+            random_latents = latents.mean(axis=-2, keepdims=True) + scale * random_vectors
+            prep_latents = jnp.concatenate([prep_latents, random_latents], axis=-2)
+        return prep_latents
 
 
 # --- Dummy classes for testing if run directly ---
