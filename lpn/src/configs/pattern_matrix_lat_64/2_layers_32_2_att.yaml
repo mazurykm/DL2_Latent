@@ -3,7 +3,7 @@
 training:
   seed: 0
   resume_from_checkpoint: null  # null to start from scratch
-  inference_mode: matrix  # mean, all, random_search, gradient_ascent
+  inference_mode: attention_params  # mean, all, random_search, gradient_ascent
   inference_kwargs:
     num_steps: 1
     lr: 0.1
@@ -43,7 +43,7 @@ eval:
       length: 48
       batch_size: 16
       num_tasks_to_show: 5
-      inference_mode: matrix
+      inference_mode: attention_params
       save-intermediate-outputs: true
 
   json_datasets:

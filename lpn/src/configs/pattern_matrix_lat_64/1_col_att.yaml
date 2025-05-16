@@ -70,7 +70,7 @@ decoder_transformer:
   _target_: src.models.utils.DecoderTransformerConfig
   max_rows: 10
   max_cols: 10
-  matrix_size_rows: 32       
+  matrix_size_rows: 64       
   matrix_size_cols: 1
   num_layers: 2
   transformer_layer:
