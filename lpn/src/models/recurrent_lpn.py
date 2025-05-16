@@ -851,6 +851,10 @@ class LPN(nn.Module):
         return_two_best: bool = False,
         **mode_kwargs,
     ):
+        # <<< DEBUG PRINT 0 (LPN level) >>>
+        jax.debug.print("LPN.generate_output: pairs.shape = {shape}", shape=pairs.shape)
+        jax.debug.print("LPN.generate_output: grid_shapes.shape = {shape}", shape=grid_shapes.shape)
+        
         latents_mu_all, latents_logvar_all = self.encoder(pairs, grid_shapes, dropout_eval)
         if latents_logvar_all is None: raise ValueError("VAE required.")
         if key is None: raise ValueError("Key required for generation.")

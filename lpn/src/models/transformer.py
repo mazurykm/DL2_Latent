@@ -72,63 +72,95 @@ class EncoderTransformer(nn.Module):
         config = self.config
         R_max, C_max = config.max_rows, config.max_cols
 
+        # <<< DEBUG PRINT 1 >>>
+        jax.debug.print("embed_grids: pairs.shape = {shape}", shape=pairs.shape)
+        jax.debug.print("embed_grids: grid_shapes.shape = {shape}", shape=grid_shapes.shape)
+
         # --- Positional Embeddings ---
         if self.config.scaled_position_embeddings:
+            # ... (your scaled pos embed logic)
             pos_row_embed_base = nn.Embed(num_embeddings=1, features=config.emb_dim,dtype=config.dtype,name="pos_row_embed_base")(jnp.array([0], dtype=jnp.uint8))[0] 
             pos_col_embed_base = nn.Embed(num_embeddings=1, features=config.emb_dim,dtype=config.dtype,name="pos_col_embed_base")(jnp.array([0], dtype=jnp.uint8))[0]
             pos_row_factors = jnp.arange(1, R_max + 1, dtype=config.dtype)[:, None]
             pos_col_factors = jnp.arange(1, C_max + 1, dtype=config.dtype)[:, None]
             pos_row_embeds = pos_row_factors * pos_row_embed_base 
             pos_col_embeds = pos_col_factors * pos_col_embed_base
-            pos_embed = pos_row_embeds[:, None, None, :] + pos_col_embeds[None, :, None, :] # (R_max, C_max, 1, emb_dim)
+            pos_embed = pos_row_embeds[:, None, None, :] + pos_col_embeds[None, :, None, :]
         else:
             pos_row_embed_direct = nn.Embed(num_embeddings=R_max,features=config.emb_dim,dtype=config.dtype,name="pos_row_embed_direct")(jnp.arange(R_max, dtype=jnp.uint8))
             pos_col_embed_direct = nn.Embed(num_embeddings=C_max,features=config.emb_dim,dtype=config.dtype,name="pos_col_embed_direct")(jnp.arange(C_max, dtype=jnp.uint8))
-            pos_embed = pos_row_embed_direct[:, None, None, :] + pos_col_embed_direct[None, :, None, :] # (R_max, C_max, 1, emb_dim)
+            pos_embed = pos_row_embed_direct[:, None, None, :] + pos_col_embed_direct[None, :, None, :]
 
         # --- Color Embeddings ---
-        # Assuming pairs is (B, N, R_actual, C_actual, 2_channels)
         colors_embed = nn.Embed(
             num_embeddings=config.vocab_size, features=config.emb_dim, dtype=config.dtype, name="colors_embed",
-        )(pairs) # Shape: (B, N, R_actual, C_actual, 2_channels, emb_dim)
+        )(pairs)
+        # <<< DEBUG PRINT 2 >>>
+        jax.debug.print("embed_grids: colors_embed.shape = {shape}", shape=colors_embed.shape)
+
 
         # --- Channel Embeddings ---
         channels_embed_vectors = nn.Embed(
             num_embeddings=2, features=config.emb_dim, dtype=config.dtype, name="channels_embed",
-        )(jnp.arange(2, dtype=jnp.uint8)) # Shape: (2, emb_dim)
+        )(jnp.arange(2, dtype=jnp.uint8))
 
         # --- Combine Grid Value Embeddings ---
-        # Get actual R, C from the pairs tensor (which might be padded up to R_max, C_max)
-        # B_dim_runtime, N_dim_runtime, R_actual, C_actual, _, _ = colors_embed.shape # More robust
-        # Assuming B and N are the first two dimensions from the caller.
-        # Example shapes:
-        # colors_embed: (16, 4, 10, 10, 2, 96)
-        # pos_embed: (10, 10, 1, 96) (already using R_max, C_max)
-
-        # We need to ensure pos_embed used matches R_actual, C_actual if pairs are not padded to R_max, C_max
-        # If pairs *are* padded, then R_actual=R_max, C_actual=C_max
-        # Let's assume pairs are padded to R_max, C_max, so colors_embed is (B, N, R_max, C_max, 2, emb_dim)
+        R_from_pairs = colors_embed.shape[-4] 
+        C_from_pairs = colors_embed.shape[-3] 
         
-        pos_embed_b = pos_embed[None, None, ...] # (1, 1, R_max, C_max, 1, emb_dim)
-        x = colors_embed + pos_embed_b # x: (B, N, R_max, C_max, 2, emb_dim)
+        sliced_pos_embed = pos_embed[:R_from_pairs, :C_from_pairs, ...] 
+        pos_embed_b = sliced_pos_embed[None, None, ...] 
+        # <<< DEBUG PRINT 3 >>>
+        jax.debug.print("embed_grids: pos_embed_b.shape = {shape}", shape=pos_embed_b.shape)
+
+        x = colors_embed + pos_embed_b
+        # <<< DEBUG PRINT 4 >>>
+        jax.debug.print("embed_grids: x after pos_embed.shape = {shape}", shape=x.shape)
         
         channels_embed_b = channels_embed_vectors.reshape((1,) * (x.ndim - 2) + channels_embed_vectors.shape)
-        x = x + channels_embed_b # x: (B, N, R_max, C_max, 2, emb_dim)
+        x = x + channels_embed_b
+        # <<< DEBUG PRINT 5 >>>
+        jax.debug.print("embed_grids: x after channel_embed.shape = {shape}", shape=x.shape)
+        # This is the x with shape (16, 4, 3, 10, 10, 2, 96)
 
-        # Flatten R_max, C_max, and 2_channels for grid values
-        # Current shape of x: (B, N, R_max, C_max, 2, emb_dim)
+        # Flatten R, C, and 2_channels dimensions for grid values
         B_dim_x = x.shape[0]
         N_dim_x = x.shape[1]
-        emb_dim_val_x = x.shape[-1]
-        # The dimensions to flatten are R_max, C_max, 2_channels
-        flat_seq_len_x = config.max_rows * config.max_cols * 2 # Use config values for fixed sequence length
-        
-        # TARGET RESHAPE:
-        x = jnp.reshape(x, (B_dim_x, N_dim_x, flat_seq_len_x, emb_dim_val_x))
-        # After this, x should be (B, N, 2*R_max*C_max, emb_dim), which is 4D.
+        # If x is (16,4,3,10,10,2,96), then x.shape[2] is the problematic 3
+        # We need to include this extra dimension in the leading dimensions if it's intentional,
+        # or understand why it's there if it's not.
 
+        # Let's assume the extra '3' needs to be part of the batch/grouping dimensions
+        # So, leading_dims are (B, N, ExtraDim)
+        if x.ndim == 7: # (B, N, Extra, R, C, Channels, Emb)
+            leading_dims_x_tuple = x.shape[:3] # (B, N, Extra)
+            R_val = x.shape[3]
+            C_val = x.shape[4]
+            channels_val = x.shape[5]
+            emb_dim_val_x = x.shape[6]
+        elif x.ndim == 6: # (B, N, R, C, Channels, Emb) - The expected case
+            leading_dims_x_tuple = x.shape[:2] # (B, N)
+            R_val = x.shape[2]
+            C_val = x.shape[3]
+            channels_val = x.shape[4]
+            emb_dim_val_x = x.shape[5]
+        else:
+            raise ValueError(f"Unexpected number of dimensions for x before final grid reshape: {x.ndim}, shape: {x.shape}")
+
+        flat_seq_len_x = R_val * C_val * channels_val
+        target_shape_x_flat = (*leading_dims_x_tuple, flat_seq_len_x, emb_dim_val_x)
+        
+        # <<< DEBUG PRINT 6 >>>
+        jax.debug.print("embed_grids: x before final grid reshape.shape = {shape}", shape=x.shape)
+        jax.debug.print("embed_grids: target_shape_x_flat for grid = {shape}", shape=target_shape_x_flat)
+
+        x = jnp.reshape(x, target_shape_x_flat)
+        # <<< DEBUG PRINT 7 >>>
+        jax.debug.print("embed_grids: x AFTER final grid reshape.shape = {shape}", shape=x.shape)
+        
         # --- Shape Token Embeddings ---
-        # This part should produce grid_shapes_embed_sequence as (*B, N, 4, emb_dim)
+        # ... (rest of the shape token embedding code) ...
+        # grid_shapes_embed_sequence should be (*leading_dims_x_tuple, 4, emb_dim_val_x)
         input_rows_tok = grid_shapes[..., 0, 0] - 1
         input_cols_tok = grid_shapes[..., 0, 1] - 1
         output_rows_tok = grid_shapes[..., 1, 0] - 1
@@ -145,7 +177,10 @@ class EncoderTransformer(nn.Module):
         emb_input_cols = grid_shape_col_embedder(input_cols_tok)
         emb_output_rows = grid_shape_row_embedder(output_rows_tok)
         emb_output_cols = grid_shape_col_embedder(output_cols_tok)
-
+        
+        # Ensure channel embeddings are added correctly to shape tokens
+        # If leading_dims_x_tuple includes the extra '3', then input_rows_tok is (B,N,Extra).
+        # emb_input_rows becomes (B,N,Extra,Emb). Adding (Emb) is fine.
         emb_input_rows  += channels_embed_vectors[0]
         emb_input_cols  += channels_embed_vectors[0]
         emb_output_rows += channels_embed_vectors[1]
@@ -153,23 +188,22 @@ class EncoderTransformer(nn.Module):
         
         grid_shapes_embed_sequence = jnp.stack(
             [emb_input_rows, emb_input_cols, emb_output_rows, emb_output_cols],
-            axis=-2 
-        ) # Shape: (B, N, 4, emb_dim)
+            axis=-2 # New axis for the 4 tokens, before emb_dim
+        ) # Shape: (*leading_dims_x_tuple, 4, emb_dim_val_x)
         
-        # Concatenate shape embeddings with grid value embeddings
-        # At this point, grid_shapes_embed_sequence should be (B, N, 4, emb_dim)
-        # And x should be (B, N, 2*R_max*C_max, emb_dim)
-        x = jnp.concatenate([grid_shapes_embed_sequence, x], axis=-2)
+        # <<< DEBUG PRINT 8 >>>
+        jax.debug.print("embed_grids: grid_shapes_embed_sequence.shape = {shape}", shape=grid_shapes_embed_sequence.shape)
+
+        x = jnp.concatenate([grid_shapes_embed_sequence, x], axis=-2) # Concat along sequence token dim
 
         # --- CLS Token ---
         cls_token_embedder = nn.Embed(
             num_embeddings=1, features=config.emb_dim, dtype=config.dtype, name="cls_token"
         )
-        # cls_idx needs to match batch (B,N)
-        cls_idx = jnp.zeros((x.shape[0], x.shape[1], 1), dtype=jnp.uint8) 
-        cls_token = cls_token_embedder(cls_idx) # (B, N, 1, emb_dim)
+        cls_idx = jnp.zeros((*leading_dims_x_tuple, 1), dtype=jnp.uint8) 
+        cls_token = cls_token_embedder(cls_idx) 
 
-        x = jnp.concatenate([cls_token, x], axis=-2) # Concat along sequence dimension
+        x = jnp.concatenate([cls_token, x], axis=-2) 
         
         expected_seq_len = 1 + 4 + 2 * config.max_len 
         assert x.shape[-2] == expected_seq_len, f"Seq len mismatch: {x.shape[-2]} vs {expected_seq_len}. Full shape: {x.shape}"
