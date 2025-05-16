@@ -70,69 +70,65 @@ class EncoderTransformer(nn.Module):
 
     def embed_grids(self, pairs: chex.Array, grid_shapes: chex.Array, dropout_eval: bool) -> chex.Array:
         config = self.config
+        R_max, C_max = config.max_rows, config.max_cols
 
-        # Position embedding block.
-        # Determine R_max, C_max (typically from config)
-        R_max = config.max_rows
-        C_max = config.max_cols
-
+        # --- Positional Embeddings ---
         if self.config.scaled_position_embeddings:
-            # This creates pos_embed with shape (R_max, C_max, 1, emb_dim)
-            pos_row_embed_base = nn.Embed(num_embeddings=1, features=config.emb_dim,dtype=config.dtype,name="pos_row_embed_base")(jnp.array([0], dtype=jnp.uint8))[0] # Get (emb_dim,)
-            pos_col_embed_base = nn.Embed(num_embeddings=1, features=config.emb_dim,dtype=config.dtype,name="pos_col_embed_base")(jnp.array([0], dtype=jnp.uint8))[0] # Get (emb_dim,)
-            
+            pos_row_embed_base = nn.Embed(num_embeddings=1, features=config.emb_dim,dtype=config.dtype,name="pos_row_embed_base")(jnp.array([0], dtype=jnp.uint8))[0] 
+            pos_col_embed_base = nn.Embed(num_embeddings=1, features=config.emb_dim,dtype=config.dtype,name="pos_col_embed_base")(jnp.array([0], dtype=jnp.uint8))[0]
             pos_row_factors = jnp.arange(1, R_max + 1, dtype=config.dtype)[:, None]
             pos_col_factors = jnp.arange(1, C_max + 1, dtype=config.dtype)[:, None]
-
-            pos_row_embeds = pos_row_factors * pos_row_embed_base # (R_max, emb_dim)
-            pos_col_embeds = pos_col_factors * pos_col_embed_base # (C_max, emb_dim)
-            
+            pos_row_embeds = pos_row_factors * pos_row_embed_base 
+            pos_col_embeds = pos_col_factors * pos_col_embed_base
             pos_embed = pos_row_embeds[:, None, None, :] + pos_col_embeds[None, :, None, :] # (R_max, C_max, 1, emb_dim)
         else:
             pos_row_embed_direct = nn.Embed(num_embeddings=R_max,features=config.emb_dim,dtype=config.dtype,name="pos_row_embed_direct")(jnp.arange(R_max, dtype=jnp.uint8))
             pos_col_embed_direct = nn.Embed(num_embeddings=C_max,features=config.emb_dim,dtype=config.dtype,name="pos_col_embed_direct")(jnp.arange(C_max, dtype=jnp.uint8))
             pos_embed = pos_row_embed_direct[:, None, None, :] + pos_col_embed_direct[None, :, None, :] # (R_max, C_max, 1, emb_dim)
 
-
+        # --- Color Embeddings ---
+        # Assuming pairs is (B, N, R_actual, C_actual, 2_channels)
         colors_embed = nn.Embed(
             num_embeddings=config.vocab_size, features=config.emb_dim, dtype=config.dtype, name="colors_embed",
-        )(pairs) # Shape: (*B_dims_model_sees, N_pairs_in_task, R_actual, C_actual, 2_channels, emb_dim)
+        )(pairs) # Shape: (B, N, R_actual, C_actual, 2_channels, emb_dim)
 
+        # --- Channel Embeddings ---
         channels_embed_vectors = nn.Embed(
             num_embeddings=2, features=config.emb_dim, dtype=config.dtype, name="channels_embed",
         )(jnp.arange(2, dtype=jnp.uint8)) # Shape: (2, emb_dim)
 
-        # Add positional embeddings
-        # colors_embed shape e.g. (1, 4, 10, 10, 2, 96)
-        # pos_embed shape (R_max, C_max, 1, 96)
-        # We need pos_embed_b to be (1, 1, R_max, C_max, 1, 96) for this specific example
-        # If R_actual from pairs might be < R_max, we need to slice pos_embed first.
-        # Assuming pairs are padded to R_max, C_max.
-        R_from_pairs = colors_embed.shape[-4] # Actual R used in pairs
-        C_from_pairs = colors_embed.shape[-3] # Actual C used in pairs
-        
-        # Slice pos_embed if necessary, then add leading dims
-        sliced_pos_embed = pos_embed[:R_from_pairs, :C_from_pairs, ...] # (R_actual, C_actual, 1, emb_dim)
-        pos_embed_b = sliced_pos_embed[None, None, ...] # (1, 1, R_actual, C_actual, 1, emb_dim)
+        # --- Combine Grid Value Embeddings ---
+        # Get actual R, C from the pairs tensor (which might be padded up to R_max, C_max)
+        # B_dim_runtime, N_dim_runtime, R_actual, C_actual, _, _ = colors_embed.shape # More robust
+        # Assuming B and N are the first two dimensions from the caller.
+        # Example shapes:
+        # colors_embed: (16, 4, 10, 10, 2, 96)
+        # pos_embed: (10, 10, 1, 96) (already using R_max, C_max)
 
-        x = colors_embed + pos_embed_b
+        # We need to ensure pos_embed used matches R_actual, C_actual if pairs are not padded to R_max, C_max
+        # If pairs *are* padded, then R_actual=R_max, C_actual=C_max
+        # Let's assume pairs are padded to R_max, C_max, so colors_embed is (B, N, R_max, C_max, 2, emb_dim)
         
-        # Add channel embeddings
-        # x shape: (*B, N, R, C, 2, emb_dim)
-        # channels_embed_vectors: (2, emb_dim)
-        # Reshape channels_embed_vectors to (1, ..., 1, 2, emb_dim) based on x's ndim
+        pos_embed_b = pos_embed[None, None, ...] # (1, 1, R_max, C_max, 1, emb_dim)
+        x = colors_embed + pos_embed_b # x: (B, N, R_max, C_max, 2, emb_dim)
+        
         channels_embed_b = channels_embed_vectors.reshape((1,) * (x.ndim - 2) + channels_embed_vectors.shape)
-        x = x + channels_embed_b
-        # x is now (*batch_and_N_dims, R, C, 2_channels, emb_dim)
+        x = x + channels_embed_b # x: (B, N, R_max, C_max, 2, emb_dim)
 
-        # Flatten R, C, and 2_channels dimensions for grid values
-        batch_and_N_dims = x.shape[:-4]
-        emb_dim_val = x.shape[-1]
-        grid_flat_seq_len = x.shape[-4] * x.shape[-3] * x.shape[-2] # R * C * 2
+        # Flatten R_max, C_max, and 2_channels for grid values
+        # Current shape of x: (B, N, R_max, C_max, 2, emb_dim)
+        B_dim_x = x.shape[0]
+        N_dim_x = x.shape[1]
+        emb_dim_val_x = x.shape[-1]
+        # The dimensions to flatten are R_max, C_max, 2_channels
+        flat_seq_len_x = config.max_rows * config.max_cols * 2 # Use config values for fixed sequence length
         
-        x = jnp.reshape(x, (*batch_and_N_dims, grid_flat_seq_len, emb_dim_val))
+        # TARGET RESHAPE:
+        x = jnp.reshape(x, (B_dim_x, N_dim_x, flat_seq_len_x, emb_dim_val_x))
+        # After this, x should be (B, N, 2*R_max*C_max, emb_dim), which is 4D.
 
         # --- Shape Token Embeddings ---
+        # This part should produce grid_shapes_embed_sequence as (*B, N, 4, emb_dim)
         input_rows_tok = grid_shapes[..., 0, 0] - 1
         input_cols_tok = grid_shapes[..., 0, 1] - 1
         output_rows_tok = grid_shapes[..., 1, 0] - 1
@@ -158,25 +154,23 @@ class EncoderTransformer(nn.Module):
         grid_shapes_embed_sequence = jnp.stack(
             [emb_input_rows, emb_input_cols, emb_output_rows, emb_output_cols],
             axis=-2 
-        ) 
+        ) # Shape: (B, N, 4, emb_dim)
         
+        # Concatenate shape embeddings with grid value embeddings
+        # At this point, grid_shapes_embed_sequence should be (B, N, 4, emb_dim)
+        # And x should be (B, N, 2*R_max*C_max, emb_dim)
         x = jnp.concatenate([grid_shapes_embed_sequence, x], axis=-2)
 
+        # --- CLS Token ---
         cls_token_embedder = nn.Embed(
             num_embeddings=1, features=config.emb_dim, dtype=config.dtype, name="cls_token"
         )
-        cls_idx_shape_prefix = x.shape[:-2] 
-        cls_idx = jnp.zeros((*cls_idx_shape_prefix, 1), dtype=jnp.uint8) 
-        cls_token = cls_token_embedder(cls_idx) 
+        # cls_idx needs to match batch (B,N)
+        cls_idx = jnp.zeros((x.shape[0], x.shape[1], 1), dtype=jnp.uint8) 
+        cls_token = cls_token_embedder(cls_idx) # (B, N, 1, emb_dim)
 
-        x = jnp.concatenate([cls_token, x], axis=-2)
+        x = jnp.concatenate([cls_token, x], axis=-2) # Concat along sequence dimension
         
-        # The sequence length for the transformer is based on config.max_len (R_max * C_max)
-        # because the model structure is fixed.
-        # The actual R and C from pairs are used to select active parts of pos_embed
-        # and for masking, but the sequence fed to transformer layers is fixed length.
-        # Therefore, grid_flat_seq_len should be based on R_max, C_max for the assert.
-        # If pairs are always padded to R_max, C_max, then x.shape[-4] etc. ARE R_max, C_max.
         expected_seq_len = 1 + 4 + 2 * config.max_len 
         assert x.shape[-2] == expected_seq_len, f"Seq len mismatch: {x.shape[-2]} vs {expected_seq_len}. Full shape: {x.shape}"
         
