@@ -531,7 +531,7 @@ class LPN(nn.Module):
             else:
                 return output_grids, output_shapes, info, intermediate_dict
 
-        def _prepare_search_candidates_for_program(
+    def _prepare_search_candidates_for_program(
         self,
         program_mu: chex.Array, # (*B, H)
         program_std: chex.Array, # (*B, H)
