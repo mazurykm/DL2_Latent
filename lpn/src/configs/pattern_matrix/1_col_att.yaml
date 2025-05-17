@@ -2,7 +2,7 @@
 
 training:
   seed: 0
-  resume_from_checkpoint: null  # null to start from scratch
+  resume_from_checkpoint: alisia-baielli/ARC/golden-plasma-294--checkpoint:latest  # null to start from scratch
   inference_mode: direct_sample  # mean, all, random_search, gradient_ascent
   inference_kwargs:
     num_steps: 1
@@ -14,7 +14,7 @@ training:
   log_gradients_every: 100
   batch_size: 128  # this has to be divisible by gradient_accumulation_steps * num_devices
   gradient_accumulation_steps: 32  # the higher the slower but the lower memory usage while keeping effective batch size constant
-  total_num_steps: 9000
+  total_num_steps: 15000
   log_every_n_steps: 100  # this has to respect dataset_size >= batch_size * log_every_n_steps
   eval_every_n_logs: 10 #3  # null to disable eval
   save_checkpoint_every_n_logs: 10  # null to disable checkpointing
@@ -42,7 +42,7 @@ eval:
       num_pairs: 4
       length: 48
       batch_size: 16
-      num_tasks_to_show: 48
+      num_tasks_to_show: 0
       inference_mode: mean_program_params
     - generator: PATTERN
       task_generator_kwargs:
@@ -51,7 +51,7 @@ eval:
       num_pairs: 4
       length: 48
       batch_size: 16
-      num_tasks_to_show: 48
+      num_tasks_to_show: 0
       inference_mode: cross_attention_multi_sample
     - generator: PATTERN
       task_generator_kwargs:
@@ -60,7 +60,7 @@ eval:
       num_pairs: 4
       length: 48
       batch_size: 16
-      num_tasks_to_show: 48
+      num_tasks_to_show: 0
       inference_mode: random_search
       inference_kwargs:
         num_samples: 50
@@ -72,7 +72,7 @@ eval:
       num_pairs: 4
       length: 48
       batch_size: 16
-      num_tasks_to_show: 48
+      num_tasks_to_show: 0
       inference_mode: random_search
       inference_kwargs:
         num_samples: 10
