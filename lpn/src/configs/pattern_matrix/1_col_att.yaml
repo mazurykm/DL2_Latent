@@ -64,18 +64,18 @@ eval:
       inference_mode: random_search
       inference_kwargs:
         num_samples: 50
-    - generator: PATTERN
-      task_generator_kwargs:
-        pattern_size: ${training.task_generator.pattern_size}
-      name: pattern_recurrent_ga
-      num_pairs: 4
-      length: 48
-      batch_size: 16
-      num_tasks_to_show: 48
-      inference_mode: recurrent_ga
-      inference_kwargs:
-        num_steps: 10
-        lr: 0.1
+    # - generator: PATTERN
+    #   task_generator_kwargs:
+    #     pattern_size: ${training.task_generator.pattern_size}
+    #   name: pattern_recurrent_ga
+    #   num_pairs: 4
+    #   length: 48
+    #   batch_size: 16
+    #   num_tasks_to_show: 48
+    #   inference_mode: recurrent_ga
+    #   inference_kwargs:
+    #     num_steps: 10
+    #     lr: 0.1
       
   json_datasets:
 
