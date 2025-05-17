@@ -14,9 +14,9 @@ training:
   log_gradients_every: 100
   batch_size: 128  # this has to be divisible by gradient_accumulation_steps * num_devices
   gradient_accumulation_steps: 32  # the higher the slower but the lower memory usage while keeping effective batch size constant
-  total_num_steps: 10
-  log_every_n_steps: 1  # this has to respect dataset_size >= batch_size * log_every_n_steps
-  eval_every_n_logs: 1 #3  # null to disable eval
+  total_num_steps: 9000
+  log_every_n_steps: 100  # this has to respect dataset_size >= batch_size * log_every_n_steps
+  eval_every_n_logs: 10 #3  # null to disable eval
   save_checkpoint_every_n_logs: 10  # null to disable checkpointing
   learning_rate: 4e-4
   prior_kl_coeff: 1e-4
@@ -65,6 +65,18 @@ eval:
       inference_kwargs:
         num_samples: 50
         scale: 1.0
+    - generator: PATTERN
+      task_generator_kwargs:
+        pattern_size: ${training.task_generator.pattern_size}
+      name: pattern_random_search_2
+      num_pairs: 4
+      length: 48
+      batch_size: 16
+      num_tasks_to_show: 48
+      inference_mode: random_search
+      inference_kwargs:
+        num_samples: 10
+        scale: 1.1
     # - generator: PATTERN
     #   task_generator_kwargs:
     #     pattern_size: ${training.task_generator.pattern_size}
