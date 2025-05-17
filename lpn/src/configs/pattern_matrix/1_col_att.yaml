@@ -64,6 +64,7 @@ eval:
       inference_mode: random_search
       inference_kwargs:
         num_samples: 50
+        scale: 1.0
     # - generator: PATTERN
     #   task_generator_kwargs:
     #     pattern_size: ${training.task_generator.pattern_size}
