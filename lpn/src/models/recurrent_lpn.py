@@ -1,5 +1,7 @@
 # --- START OF FILE recurrent_lpn.py ---
 
+# --- START OF FILE recurrent_lpn.py ---
+
 from typing import Literal, Optional
 import math
 from functools import partial
@@ -443,9 +445,24 @@ class LPN(nn.Module):
         elif mode == "cross_attention_multi_sample":
             num_samples_for_attn = mode_kwargs.get("num_samples_for_attn", 16) # e.g., 16 samples
             # 1. Draw multiple samples from P(program | N examples)
-            multi_samples = program_mu[:, None, :] + program_std[:, None, :] * jax.random.normal(
-                key_sampling, (program_mu.shape[0], num_samples_for_attn, program_mu.shape[-1])
-            ) # (*B, M, H)
+            
+            # Original problematic line:
+            # multi_samples = program_mu[:, None, :] + program_std[:, None, :] * jax.random.normal(
+            #     key_sampling, (program_mu.shape[0], num_samples_for_attn, program_mu.shape[-1])
+            # )
+
+            # Corrected version:
+            # program_mu has shape (*B, H), program_std has shape (*B, H)
+            # noise_shape_tuple will be (*B, num_samples_for_attn, H)
+            noise_shape_tuple = program_mu.shape[:-1] + (num_samples_for_attn, program_mu.shape[-1])
+            noise = jax.random.normal(key_sampling, noise_shape_tuple)
+            
+            # Expand program_mu and program_std to (*B, 1, H) for broadcasting with noise
+            program_mu_expanded = program_mu[..., None, :]
+            program_std_expanded = program_std[..., None, :]
+            
+            multi_samples = program_mu_expanded + program_std_expanded * noise # Shape: (*B, num_samples_for_attn, H)
+            
             # 2. Combine these M samples using global attention
             effective_context = self._compute_global_attention_context(multi_samples) # (*B, H)
             info["multi_samples_for_attn"] = multi_samples
@@ -548,7 +565,8 @@ class LPN(nn.Module):
 
         if num_samples > 0:
             # Sample random vectors around program_mu
-            noise = jax.random.normal(key, (*program_mu.shape[:-1], num_samples, program_mu.shape[-1]))
+            noise_shape_tuple = program_mu.shape[:-1] + (num_samples, program_mu.shape[-1])
+            noise = jax.random.normal(key, noise_shape_tuple)
             # Scale noise by program_std and the user-provided scale
             random_candidates = program_mu[..., None, :] + (program_std[..., None, :] * scale * noise)
             candidates.append(random_candidates)
@@ -605,7 +623,15 @@ class LPN(nn.Module):
         def evaluate_one_candidate(candidate_vec):
             # candidate_vec: (*B, H)
             # Repeat this candidate N times to feed into loss function
-            context_for_loss = candidate_vec[:, None, :].repeat(support_pairs.shape[-4], axis=-2) # (*B, N, H)
+            # support_pairs.shape[-4] is N (number of support pairs)
+            num_support_pairs = support_pairs.shape[-4]
+            
+            # Add the N dimension to candidate_vec by repeating
+            # candidate_vec has shape, e.g., (batch_dim1, batch_dim2, H)
+            # We want (batch_dim1, batch_dim2, N, H)
+            # Insert new axis for N: candidate_vec[..., None, :] -> (*B, 1, H)
+            # Then repeat along this new axis N times.
+            context_for_loss = jnp.repeat(candidate_vec[..., None, :], num_support_pairs, axis=-2) # (*B, N, H)
             
             loss_per_pair, _ = self._loss_from_pair_and_context(
                 context_for_loss,
@@ -700,25 +726,25 @@ class LPN(nn.Module):
         """ Computes a single context vector using attention over all N sampled latents.
             Used for Generation mode 'cross_attention'.
             Query: Mean of N latents. Key/Value: The N latents.
-            Input: latents shape (*B, N, H)
+            Input: latents shape (*B, N_samples, H)
             Output: context shape (*B, H)
         """
-        batch_dims = latents.shape[:-2]
-        N = latents.shape[-2]
+        # latents here could be multi_samples with shape (*B, M, H)
+        # where M is num_samples_for_attn
         H = latents.shape[-1]
         sqrt_dh = jnp.sqrt(float(H))
 
-        # Query: Mean of all N latents. Shape (*B, 1, H)
+        # Query: Mean of all M samples. Shape (*B, 1, H)
         query = latents.mean(axis=-2, keepdims=True)
 
-        # Key/Value are the latents themselves. Shape (*B, N, H)
+        # Key/Value are the latents themselves. Shape (*B, M, H)
         key = latents
         value = latents
 
-        # Attention scores. Shape (*B, 1, N)
+        # Attention scores. Shape (*B, 1, M)
         attn_scores = jnp.einsum('...qh,...kh->...qk', query, key) / sqrt_dh
 
-        # Attention weights. Shape (*B, 1, N)
+        # Attention weights. Shape (*B, 1, M)
         attn_weights = jax.nn.softmax(attn_scores, axis=-1)
 
         # Weighted sum (attended context). Shape (*B, 1, H)
@@ -780,8 +806,6 @@ class LPN(nn.Module):
             Inputs: latents_mu (*B, N, H), latents_logvar (*B, N, H)
             Outputs: context_mu (*B, H), context_logvar (*B, H)
         """
-        batch_dims = latents_mu.shape[:-2]
-        N = latents_mu.shape[-2]
         H = latents_mu.shape[-1]
         sqrt_dh = jnp.sqrt(float(H))
 
@@ -885,9 +909,14 @@ class LPN(nn.Module):
             )
         except ValueError as e:
              print(f"Error converting context to matrix during generation: {e}")
-             dummy_grid = jnp.zeros_like(input)
+             dummy_grid = jnp.zeros_like(input) # Ensure dummy_grid matches input's batch shape
+             # input may have shape (*B, R, C). dummy_grid should be (*B, max_rows, max_cols)
+             # For simplicity, let's assume input provides the batch shape, and output grid is max_rows, max_cols
+             batch_shape = input.shape[:-2]
+             dummy_grid = jnp.zeros((*batch_shape, max_rows, max_cols), dtype=input.dtype)
              dummy_shape = jnp.ones_like(input_grid_shape)
              return dummy_grid, dummy_shape, None
+
 
         current_input_grid = input
         # current_input_shape is updated only at the end using the last step's prediction
@@ -903,38 +932,33 @@ class LPN(nn.Module):
 
         # To work correctly with @nn.compact and nn.scan, DecoderStep should also be an nn.Module
         # And it will be instantiated by nn.scan.
-        class DecoderStep(nn.Module):
-            # The main decoder is an attribute of LPN, not directly of DecoderStep's definition.
-            # We'll access it via `self.parent.decoder` if LPN is `self.parent`.
-            # Or, more simply, pass the main decoder module instance to nn.scan.
-            decoder_to_use: DecoderTransformer
-            fixed_dropout_eval: bool # dropout_eval is fixed per generate_output call
-
-            @nn.compact
-            def __call__(self, carry, scan_input):
-                # carry: (target_seq_prev_step, fixed_input_seq_for_decoder, fixed_context_col_for_decoder)
-                # scan_input: current_token_idx_to_predict
-                target_seq_prev_step, fixed_input_seq, fixed_context_col = carry
-                current_token_idx_to_predict = scan_input
-
-                _, _, grid_logits = self.decoder_to_use( # Call the passed decoder instance
-                    fixed_input_seq, target_seq_prev_step, fixed_context_col, self.fixed_dropout_eval
-                )
-                current_token_logits = grid_logits[..., current_token_idx_to_predict, :]
-                predicted_token = jnp.argmax(current_token_logits, axis=-1).astype(jnp.int32)
-                target_seq_updated = target_seq_prev_step.at[..., 2 + current_token_idx_to_predict].set(predicted_token)
-                
-                # New carry for next step remains the same for fixed_input_seq and fixed_context_col
-                new_carry = (target_seq_updated, fixed_input_seq, fixed_context_col)
-                return new_carry, None # (new_carry, per_step_output)
-
-
+        # Using the globally defined DecoderStep
+        
         for t in range(matrix_size_cols):
             context_col = context_matrix[..., :, t]
 
             # Prepare input sequence for this recurrent step 't'
-            # For generation, current_input_grid is the output from step t-1
-            flattened_current_grid_for_step_t = jnp.reshape(current_input_grid, (*current_input_grid.shape[:-2], -1))
+            # For generation, current_input_grid is the output from step t-1 (or original input for t=0)
+            # Ensure current_input_grid is padded/truncated to max_rows, max_cols if necessary before flattening
+            # For now, assume current_input_grid dimensions are compatible or handled by reshape.
+            
+            # If current_input_grid is from previous step, it's (..., max_rows, max_cols)
+            # If it's the initial input, it's (..., R_in, C_in)
+            # We need to make sure it's consistently shaped for flattening to max_len.
+            # Assuming current_input_grid is already (*B, max_rows, max_cols) after first step.
+            # For t=0, input might not be (max_rows, max_cols). Let's pad/truncate it.
+            
+            _batch_shape = current_input_grid.shape[:-2]
+            _R_curr, _C_curr = current_input_grid.shape[-2:]
+            
+            # Pad to max_rows, max_cols if smaller, truncate if larger
+            padded_current_grid_for_step_t = jnp.zeros((*_batch_shape, max_rows, max_cols), dtype=current_input_grid.dtype)
+            r_slice = slice(min(_R_curr, max_rows))
+            c_slice = slice(min(_C_curr, max_cols))
+            padded_current_grid_for_step_t = padded_current_grid_for_step_t.at[..., r_slice, c_slice].set(current_input_grid[..., r_slice, c_slice])
+            
+            flattened_current_grid_for_step_t = jnp.reshape(padded_current_grid_for_step_t, (*_batch_shape, -1))
+
             # input_grid_shape here should be the original task's input shape,
             # as the shape prediction part predicts the *output* shape based on this.
             current_input_seq_for_step_t = jnp.concatenate([input_grid_shape, flattened_current_grid_for_step_t], axis=-1)
@@ -965,31 +989,24 @@ class LPN(nn.Module):
             # Initial carry for the inner scan
             initial_carry_for_scan = (target_seq_so_far_for_shape, current_input_seq_for_step_t, context_col)
             
-            # Instantiate DecoderStep for nn.scan by passing its *type* and *static_args*
-            # `nn.scan` will then instantiate it correctly within the compact scope.
-            # `self.decoder` is the main decoder instance from the LPN model.
             scan_module_constructor = nn.scan(
-                DecoderStep, # Pass the class type
-                variable_broadcast="params", # Parameters of self.decoder are shared
-                split_rngs={"params": False, "dropout": False}, # Dropout is handled by dropout_eval
+                DecoderStep, 
+                variable_broadcast="params", 
+                split_rngs={"params": False, "dropout": True if not dropout_eval else False}, # Split dropout RNG if training
                 length=max_len
-                # REMOVED: name=f"decoder_scan_t{t}" -> This was incorrect here
             )
             
-            # Construct the module that will be scanned using the arguments for DecoderStep's __init__
-            # These are (decoder_to_use, fixed_dropout_eval)
-            scanned_decoder_step = scan_module_constructor(self.decoder, dropout_eval) 
+            scanned_decoder_step = scan_module_constructor(decoder_to_use=self.decoder, fixed_dropout_eval=dropout_eval, name=f"decoder_scan_t{t}") 
             
-            # Run the scan
-            final_scan_carry, _ = scanned_decoder_step(initial_carry_for_scan, jnp.arange(max_len)) # (initial_carry, xs)
-            final_target_seq = final_scan_carry[0] # The first element of the carry tuple is the updated target_seq
+            final_scan_carry, _ = scanned_decoder_step(initial_carry_for_scan, jnp.arange(max_len)) 
+            final_target_seq = final_scan_carry[0]
 
             predicted_grid_tokens = final_target_seq[..., 2:]
             predicted_output_grid = jnp.reshape(predicted_grid_tokens,
                                                 (*predicted_grid_tokens.shape[:-1], max_rows, max_cols))
 
             # Update current_input_grid for the next outer loop iteration (t+1)
-            current_input_grid = predicted_output_grid
+            current_input_grid = predicted_output_grid # This is now (..., max_rows, max_cols)
             
             # The overall final shape is taken from the prediction of the *last* recurrent step
             if t == matrix_size_cols - 1:
@@ -997,15 +1014,21 @@ class LPN(nn.Module):
 
             if save_intermediate:
                 intermediate_outputs[t] = {
-                    "grid": current_input_grid,
-                    # Shape saved is the one predicted at this step t, which would inform step t+1 if shape was evolving
+                    "grid": current_input_grid, # This is the grid that becomes input to next step
                     "shape": predicted_output_shape_for_this_step_t,
                     "context_col": context_col,
                 }
+        
+        # Crop final_output_grids to final_predicted_shape_overall
+        # current_input_grid is (*B, max_rows, max_cols)
+        # final_predicted_shape_overall is (*B, 2)
+        # We need to create a result grid of varying sizes per batch item.
+        # This is tricky with JAX unless using ragged tensors or padding.
+        # For ARC, typically one returns the full max_rows x max_cols grid and the predicted shape.
+        # The evaluation logic then crops based on the predicted shape.
+        final_output_grids = current_input_grid # This is (..., max_rows, max_cols)
 
-        # final_output_grids is current_input_grid after the loop
-        # final_output_shapes is the shape predicted in the *last* step t
-        return current_input_grid, final_predicted_shape_overall, intermediate_outputs if save_intermediate else None
+        return final_output_grids, final_predicted_shape_overall, intermediate_outputs if save_intermediate else None
 
     def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:
         """
@@ -1075,153 +1098,5 @@ class LPN(nn.Module):
         return jnp.concatenate(collected_logits, axis=-2)
 
 
-# --- Dummy classes for testing if run directly ---
-if __name__ == "__main__":
-    # Example usage or test setup would go here
-    print("LPN class defined with cross_attention and attention_params modes.")
-    # Need to define dummy Transformer configs and modules for instantiation.
-    # from src.models.utils import TransformerLayerConfig # Assuming this exists
-
-    # Example Configs (adjust dimensions as needed)
-    latent_dim = 64
-    embed_dim = 64
-    num_heads = 4
-    num_layers = 3
-    max_len = 25 # 5x5
-    vocab_size = 10
-    max_rows = 5
-    max_cols = 5
-
-    enc_config = EncoderTransformerConfig(
-        embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers,
-        latent_dim=latent_dim, vocab_size=vocab_size, use_vae=True, # Enable VAE
-        max_rows=max_rows, max_cols=max_cols
-    )
-    dec_config = DecoderTransformerConfig(
-        embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers,
-        latent_dim=latent_dim, vocab_size=vocab_size,
-        max_rows=max_rows, max_cols=max_cols
-    )
-
-    # Dummy Modules (replace with actual imports if available)
-    class DummyEncoder(nn.Module):
-        config: EncoderTransformerConfig
-        @nn.compact
-        def __call__(self, pairs, grid_shapes, dropout_eval):
-             B, N, R, C, _ = pairs.shape
-             H = self.config.latent_dim
-             mu = jnp.zeros((B, N, H))
-             logvar = jnp.zeros((B, N, H)) # Log variance = 0 -> Variance = 1
-             return mu, logvar if self.config.use_vae else None
-
-    class DummyDecoder(nn.Module):
-        config: DecoderTransformerConfig
-        @nn.compact
-        def __call__(self, input_seq, output_seq, context, dropout_eval):
-            B = input_seq.shape[0]
-            N = input_seq.shape[1] if input_seq.ndim == 3 else 1 # Handle generation case
-            R, C, V = self.config.max_rows, self.config.max_cols, self.config.vocab_size
-            L = R*C
-
-            # Adjust output shape based on input sequence shape (training vs generation)
-            if input_seq.ndim == 3: # Training: (*B, N, L+2)
-                row_logits = jnp.zeros((B, N, R))
-                col_logits = jnp.zeros((B, N, C))
-                grid_logits = jnp.zeros((B, N, L, V))
-            else: # Generation: (*B, L+2)
-                row_logits = jnp.zeros((B, R))
-                col_logits = jnp.zeros((B, C))
-                grid_logits = jnp.zeros((B, L, V))
-            return row_logits, col_logits, grid_logits
-
-    # Instantiate LPN
-    lpn = LPN(encoder=DummyEncoder(enc_config), decoder=DummyDecoder(dec_config))
-
-    # Example Dummy Data
-    B, N_pairs, R_max, C_max = 2, 4, max_rows, max_cols
-    dummy_pairs = jnp.zeros((B, N_pairs, R_max, C_max, 2), dtype=jnp.int32)
-    dummy_grid_shapes = jnp.ones((B, N_pairs, 2, 2), dtype=jnp.int32) * 3 # e.g., 3x3 grids
-    dummy_grid_shapes = jnp.clip(dummy_grid_shapes, 1, max(R_max, C_max))
-
-    # --- Test __call__ ---
-    key = jax.random.PRNGKey(0)
-    key, call_key = jax.random.split(key)
-    params = lpn.init(call_key, dummy_pairs, dummy_grid_shapes, True, max_rows, 1, "mean")["params"] # Init with mean mode
-
-    print("\nTesting __call__ with 'attention_params'...")
-    try:
-        loss, metrics = lpn.apply(
-            {"params": params},
-            dummy_pairs,
-            dummy_grid_shapes,
-            dropout_eval=True,
-            matrix_size_rows=latent_dim, # Example: latent_dim rows
-            matrix_size_cols=1,        # Example: 1 column (no recurrence needed if 1)
-            mode="attention_params",
-            prior_kl_coeff=0.1,
-            pairwise_kl_coeff=0.01,
-            context_kl_coeff=0.1, # Required for attention_params
-            rngs={"latents_sample_orig": key, "latents_sample_context": key+1} # Provide RNGs
-        )
-        print("Loss:", loss)
-        # print("Metrics:", metrics) # Can be verbose
-        print("'attention_params' call successful.")
-    except Exception as e:
-        print(f"'attention_params' call failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-    # --- Test generate_output ---
-    dummy_input = jnp.zeros((B, R_max, C_max), dtype=jnp.int32)
-    dummy_input_shape = jnp.ones((B, 2), dtype=jnp.int32) * 3
-    dummy_input_shape = jnp.clip(dummy_input_shape, 1, max(R_max, C_max))
-    key, gen_key = jax.random.split(key)
-
-    print("\nTesting generate_output with 'attention_params'...")
-    try:
-        grids, shapes, info, _ = lpn.apply(
-             {"params": params},
-             dummy_pairs, dummy_grid_shapes, # Support examples
-             dummy_input, dummy_input_shape, # New input
-             key=gen_key, # RNG key for sampling context
-             dropout_eval=True,
-             matrix_size_rows=latent_dim,
-             matrix_size_cols=1,
-             mode="attention_params",
-             return_two_best=False,
-             mutable=False, # generate_output doesn't modify state typically
-             method=lpn.generate_output # Specify the method
-        )
-        print("Generated grid shape:", grids.shape)
-        print("Generated shape shape:", shapes.shape)
-        print("'attention_params' generation successful.")
-    except Exception as e:
-        print(f"'attention_params' generation failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-    print("\nTesting generate_output with 'cross_attention'...")
-    try:
-         grids, shapes, info, _ = lpn.apply(
-              {"params": params},
-              dummy_pairs, dummy_grid_shapes, # Support examples
-              dummy_input, dummy_input_shape, # New input
-              key=gen_key+1, # RNG key for sampling latents
-              dropout_eval=True,
-              matrix_size_rows=latent_dim,
-              matrix_size_cols=1,
-              mode="cross_attention",
-              return_two_best=False,
-              mutable=False,
-              method=lpn.generate_output
-         )
-         print("Generated grid shape:", grids.shape)
-         print("Generated shape shape:", shapes.shape)
-         print("'cross_attention' generation successful.")
-    except Exception as e:
-         print(f"'cross_attention' generation failed: {e}")
-         import traceback
-         traceback.print_exc()
 
 # --- END OF FILE ---
