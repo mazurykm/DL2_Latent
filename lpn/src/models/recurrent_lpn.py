@@ -492,7 +492,7 @@ class LPN(nn.Module):
         if return_two_best and second_effective_context is None: # e.g. for modes other than random_search
             second_effective_context = effective_context # Default second best to best
 
-        info["final_effective_context"] = effective_context
+        info["context"] = effective_context
         if return_two_best:
             info["second_final_effective_context"] = second_effective_context
 
