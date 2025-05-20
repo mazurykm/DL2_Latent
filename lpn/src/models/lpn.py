@@ -65,8 +65,12 @@ class LPN(nn.Module):
             latents = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
             latents = jnp.tile(latents[:, None, :], (1, pairs.shape[1], 1))
             leave_one_out_latents = make_leave_one_out(latents, axis=-2)
-            
-            if mode == "random_search":
+            if mode == "first":
+                # Compute the context vector by taking the first latent.
+                context = latents[..., 0, :]
+                # Compute the loss for each pair using the first latent. Shape (*B, N).
+                loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            elif mode == "random_search":
                 for arg in ["num_samples", "scale"]:
                     assert arg in mode_kwargs, f"'{arg}' argument required for 'random_search' training mode."
                 key = self.make_rng("random_search")
@@ -320,6 +324,7 @@ class LPN(nn.Module):
         mode: Literal["mean", "first", "random_search", "gradient_ascent"],
         *,
         return_two_best: bool = False,
+        use_cross_attention: bool = True,
         **mode_kwargs,
     ):
         """
@@ -383,22 +388,64 @@ class LPN(nn.Module):
         if mode_kwargs.get("remove_encoder_latents", False):
             assert key is not None, "'key' argument required when 'remove_encoder_latents' is True."
             latents = jax.random.normal(key, latents.shape)
+        
+        if use_cross_attention:
+            print("using cross attention")
+            test_input = jnp.stack([input, input], axis=-1)  # (*B, R, C, 2)
+            # Add singleton dimension to match pairs shape
+            test_input = test_input[:, None]  # (*B, 1, R, C, 2)
+            # For grid_shapes, we need (*B, 1, 2, 2) where the last dimension 
+            # represents rows and columns for input and output
+            input_rows, input_cols = input_grid_shape[:, 0:1], input_grid_shape[:, 1:2]
+            # Create with proper broadcasting shape
+            test_shape = jnp.zeros((*input.shape[:-2], 1, 2, 2), dtype=input_grid_shape.dtype)
+            test_shape = test_shape.at[..., 0, 0].set(input_rows)  # input rows
+            test_shape = test_shape.at[..., 0, 1].set(input_rows)  # output rows (same as input)
+            test_shape = test_shape.at[..., 1, 0].set(input_cols)  # input cols
+            test_shape = test_shape.at[..., 1, 1].set(input_cols)  # output cols (same as input)
+            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)
+            query = test_latent[..., None, :]  
+            keys = latents 
+            values = latents 
+            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1]) 
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
+            latents = jnp.matmul(attn_weights, values).squeeze(axis=-2) 
+            if mode == "first":
+                context = latents[..., 0, :]
+                first_context, second_context = context, context
+            elif mode == "random_search":
+                assert key is not None, "'key' argument required for 'random_search' inference mode."
+                for arg in ["num_samples", "scale"]:
+                    assert arg in mode_kwargs, f"'{arg}' argument required for 'random_search' inference mode."
+
+                first_context, second_context = self._get_random_search_context(
+                    latents, pairs, grid_shapes, key, **mode_kwargs
+                )
+            elif mode == "gradient_ascent":
+                for arg in ["num_steps", "lr"]:
+                    assert arg in mode_kwargs, f"'{arg}' argument required for 'gradient_ascent' inference mode."
+
+                first_context, second_context = self._get_gradient_ascent_context(
+                    latents, pairs, grid_shapes, key, **mode_kwargs
+                )
+            else:
+                raise ValueError(f"Unsupported mode: {mode}")
         if mode == "mean":
             context = latents.mean(axis=-2)
             first_context, second_context = context, context
-        elif mode == "cross_attention":
-            test_input = jnp.stack([input, input], axis=-1)  
-            test_input = test_input[:, None] 
-            test_shape = jnp.tile(input_grid_shape[:, None, None, :], (1, 1, 2, 1)) 
+        # elif mode == "cross_attention":
+        #     test_input = jnp.stack([input, input], axis=-1)  
+        #     test_input = test_input[:, None] 
+        #     test_shape = jnp.tile(input_grid_shape[:, None, None, :], (1, 1, 2, 1)) 
 
-            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2) 
-            query = test_latent[..., None, :]  
-            keys = latents 
-            values = latents  
-            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1]) 
-            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
-            context = jnp.matmul(attn_weights, values).squeeze(axis=-2) 
-            first_context, second_context = context, context
+        #     test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2) 
+        #     query = test_latent[..., None, :]  
+        #     keys = latents 
+        #     values = latents  
+        #     attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1]) 
+        #     attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
+        #     context = jnp.matmul(attn_weights, values).squeeze(axis=-2) 
+        #     first_context, second_context = context, context
         elif mode == "first":
             context = latents[..., 0, :]
             first_context, second_context = context, context
