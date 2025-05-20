@@ -51,7 +51,6 @@ class LPN(nn.Module):
         current_context_source_latents = base_latents
         
         if use_cross_attention:
-            # print(f"LPN __call__: using cross attention: {use_cross_attention}") 
             H = base_latents.shape[-1]
             sqrt_dh = jnp.sqrt(float(H))
             query = base_latents.mean(axis=-2, keepdims=True) 
@@ -86,7 +85,8 @@ class LPN(nn.Module):
                 )
             else: 
                 for arg in ["num_steps", "lr"]: assert arg in mode_kwargs
-                key_ga = self.make_rng("gradient_ascent_random_perturbation") if mode_kwargs.get("random_perturbation") else None
+                key_ga_name = "gradient_ascent_random_perturbation" # Name for make_rng
+                key_ga = self.make_rng(key_ga_name) if mode_kwargs.get("random_perturbation") else None
                 context_for_loss, _ = self._get_gradient_ascent_context(
                     leave_one_out_source_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key_ga, **mode_kwargs
                 )
@@ -194,7 +194,7 @@ class LPN(nn.Module):
             grid_logits, grid_shapes_col[..., None, None]
         )
         if config.max_cols > 0 and grid_logits.shape[-2] >= config.max_cols :
-            if last_non_padded_logits.shape[-2] > 0 : 
+            if hasattr(last_non_padded_logits, 'shape') and last_non_padded_logits.shape[-2] > 0 : 
                 grid_logits = grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
 
         one_hot_grid_labels = jax.nn.one_hot(pairs[..., 1].reshape(*pairs.shape[:-3], -1), config.vocab_size)
@@ -227,7 +227,7 @@ class LPN(nn.Module):
         self,
         pairs: chex.Array,        
         grid_shapes: chex.Array,  
-        input: chex.Array,        
+        input: chex.Array,        # User's original name for target input grid
         input_grid_shape: chex.Array, 
         key: Optional[chex.PRNGKey],
         dropout_eval: bool,
@@ -236,7 +236,7 @@ class LPN(nn.Module):
         use_cross_attention: bool = False, 
         **mode_kwargs,
     ) -> Union[tuple[chex.Array, chex.Array, dict], tuple[chex.Array, chex.Array, chex.Array, chex.Array, dict]]:
-        input_grid = input 
+        input_grid = input # Use 'input_grid' internally for clarity
 
         latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
 
@@ -280,7 +280,8 @@ class LPN(nn.Module):
                 source_latents_for_gen_modes, pairs, grid_shapes, _key_for_search_or_ga, **mode_kwargs
             )
         elif mode == "gradient_ascent":
-            assert _key_for_search_or_ga is not None, "Key required for gradient_ascent random_perturbation."
+            # Use _key_for_search_or_ga for GA's potential random_perturbation key
+            # if mode_kwargs for GA contains random_perturbation, it will use this key.
             for arg in ["num_steps", "lr"]: assert arg in mode_kwargs
             first_context, second_context = self._get_gradient_ascent_context(
                 source_latents_for_gen_modes, pairs, grid_shapes, _key_for_search_or_ga, **mode_kwargs
@@ -294,7 +295,7 @@ class LPN(nn.Module):
             contexts_to_generate = jnp.stack([first_context, second_context], axis=0)
             output_grids_stacked, output_shapes_stacked = jax.vmap(
                 partial(self._generate_output_from_context, 
-                        input_grid=input_grid, 
+                        input_grid=input_grid, # from outer scope (original 'input' arg)
                         input_grid_shape=input_grid_shape, 
                         dropout_eval=dropout_eval)
             )(contexts_to_generate)
@@ -329,13 +330,10 @@ class LPN(nn.Module):
                 input_seq_N1, output_seq_step_N1, context_N1, dropout_eval
             )
             target_logits_N1 = pred_row_logits_N1 if row_flag else pred_col_logits_N1
-            # Squeeze the N=1 dimension (which is at axis `len(batch_dims)`)
-            # If batch_dims is (B1,B2), N=1 is at axis 2. target_logits_N1 (B1,B2,1,V). Squeeze axis 2.
             axis_to_squeeze_N = len(batch_dims) 
             target_logits_single = target_logits_N1.squeeze(axis=axis_to_squeeze_N) 
             
             new_token_val_single = jnp.argmax(target_logits_single, axis=-1).astype(output_seq_single_init.dtype) + 1
-            # new_token_val_single is (*batch_dims). Slice is (*batch_dims, 1). Expand last dim.
             new_token_val_expanded = new_token_val_single[..., None]
 
             token_idx = 0 if row_flag else 1
@@ -344,7 +342,6 @@ class LPN(nn.Module):
         current_output_seq_N1 = grid_shape_step_fn(current_output_seq_N1, row_flag=True)
         current_output_seq_N1 = grid_shape_step_fn(current_output_seq_N1, row_flag=False)
         
-        # Squeeze N=1 dim for output_shapes_predicted
         axis_to_squeeze_N_shape = len(batch_dims)
         output_shapes_predicted = current_output_seq_N1[..., :2].squeeze(axis=axis_to_squeeze_N_shape)
         max_cols_cfg = self.decoder.config.max_cols
@@ -360,11 +357,10 @@ class LPN(nn.Module):
             final_sel_idx_single = jnp.where(is_start_of_new_row, prev_row_end_log_idx, current_pos_log_idx)
             
             idx_for_take_N1 = jnp.reshape(final_sel_idx_single, (*batch_dims, 1, 1, 1))
-            sel_logits_N1 = jnp.take_along_axis(pred_grid_lgts_N1, idx_for_take_N1, axis=-2) # seq_dim is -2 for (*batch,N,S,V)
+            sel_logits_N1 = jnp.take_along_axis(pred_grid_lgts_N1, idx_for_take_N1, axis=len(batch_dims) + 1) 
             
-            # Squeeze N=1 dim (axis=len(batch_dims)) and token_seq_dim (axis=len(batch_dims)+1)
             axis_N_sqz = len(batch_dims)
-            axis_S_token_sqz = len(batch_dims) + 1
+            axis_S_token_sqz = len(batch_dims) + 1 
             sel_logits_single = sel_logits_N1.squeeze(axis=(axis_N_sqz, axis_S_token_sqz))
             
             new_grid_token_val_single = jnp.argmax(sel_logits_single, axis=-1).astype(output_seq_single_init.dtype)
@@ -374,7 +370,9 @@ class LPN(nn.Module):
             return updated_loop_output_seq_N1, None
 
         final_gen_output_seq_N1, _ = nn.scan(
-            scan_step_fn, variable_broadcast="params", split_rngs={"params": False},
+            scan_step_fn, 
+            variable_broadcast=["params", "batch_stats"], # Changed to include batch_stats
+            split_rngs={"params": False}, # Assuming no per-step RNG use in decoder if dropout_eval=True
         )(current_output_seq_N1, jnp.arange(self.decoder.config.max_len))
 
         axis_to_squeeze_N_final = len(batch_dims)
@@ -399,20 +397,24 @@ class LPN(nn.Module):
         key: Optional[chex.PRNGKey] = None,
     ) -> chex.Array:
         prep_latents_list = []
-        # Default H for perturbation if latents K=0. Needs better handling if decoder available.
-        # For now, assume latents.shape[-1] is valid or an error will occur.
-        default_H_if_K_is_zero = latents.shape[-1] if latents.ndim > 0 and latents.shape[-1] > 0 else 0
-
+        H_dim = latents.shape[-1] if latents.ndim > 0 and latents.shape[-1] > 0 else 0
 
         if latents.shape[-2] > 0 : 
             if include_all_latents: prep_latents_list.append(latents)
             if include_mean_latent: 
                 mean_latent = latents.mean(axis=-2, keepdims=True)
                 prep_latents_list.append(mean_latent)
-            if not prep_latents_list: prep_latents_list.append(latents)
+            if not prep_latents_list and latents.shape[-2] > 0: # If K>0 and no option selected, use all by default
+                 prep_latents_list.append(latents)
         
-        current_prep_latents = jnp.concatenate(prep_latents_list, axis=-2) if prep_latents_list else \
-                               jnp.zeros((*latents.shape[:-2], 0, default_H_if_K_is_zero ), dtype=latents.dtype)
+        if prep_latents_list:
+            current_prep_latents = jnp.concatenate(prep_latents_list, axis=-2)
+        else: # No initial latents from include_mean/all, or latents K=0
+            if H_dim == 0 and random_perturbation is None: # Cannot infer H, and no random samples to define H
+                raise ValueError("Cannot prepare latents: H_dim is 0 and no random_perturbation.")
+            # Create a K=0 array with H_dim if possible, for typed concatenation later
+            current_prep_latents = jnp.zeros((*latents.shape[:-2], 0, H_dim if H_dim > 0 else 1 ), dtype=latents.dtype)
+
 
         if random_perturbation is not None:
             assert key is not None, "Key required for random perturbation."
@@ -421,58 +423,49 @@ class LPN(nn.Module):
 
             if latents.shape[-2] > 0:
                 perturb_base = latents.mean(axis=-2, keepdims=True)
-            else: # K=0, perturb around zero vector.
-                  # Infer H from latents if possible (e.g. shape is (B,0,H)), else error or use default_H_if_K_is_zero
-                H_for_zeros = latents.shape[-1] if latents.ndim > 1 and latents.shape[-1] > 0 else default_H_if_K_is_zero
-                if H_for_zeros == 0: raise ValueError("Cannot determine H for zero-perturbation base.")
-                perturb_base = jnp.zeros((*latents.shape[:-2], 1, H_for_zeros), dtype=latents.dtype)
-
+            else: 
+                if H_dim == 0: raise ValueError("Cannot determine H for zero-perturbation base when K=0.")
+                perturb_base = jnp.zeros((*latents.shape[:-2], 1, H_dim), dtype=latents.dtype)
 
             random_vectors = jax.random.normal(key, (*perturb_base.shape[:-2], num_rand_samples, perturb_base.shape[-1]))
             perturbed_random_latents = perturb_base + scale_rand * random_vectors
             
-            current_prep_latents = jnp.concatenate([current_prep_latents, perturbed_random_latents], axis=-2) if current_prep_latents.shape[-2] > 0 else perturbed_random_latents
+            if current_prep_latents.shape[-2] > 0:
+                 current_prep_latents = jnp.concatenate([current_prep_latents, perturbed_random_latents], axis=-2)
+            else: # current_prep_latents was K=0 placeholder
+                 current_prep_latents = perturbed_random_latents
         
-        if current_prep_latents.shape[-2] == 0:
-            raise ValueError("No latents prepared for search. Check config.")
+        if current_prep_latents.shape[-2] == 0: # Should not happen if H_dim was valid
+            raise ValueError("No latents prepared for search. Final K=0.")
         return current_prep_latents
 
     @staticmethod
     def _select_best_and_second_best_latents(
         log_probs: chex.Array, latents: chex.Array 
     ) -> tuple[chex.Array, chex.Array]:
-        # log_probs: (*batch_dims_lp, K)
-        # latents: (*batch_dims_l, K, H)
-        # Ensure batch_dims_lp == batch_dims_l
-        
-        k_dim_log_probs = -1 
-        # k_dim_latents depends on how many batch_dims latents has. It's the dim before H.
+        k_dim_log_probs = log_probs.ndim - 1 
         k_dim_latents = latents.ndim - 2
 
         sorted_indices = jnp.argsort(log_probs, axis=k_dim_log_probs, descending=True)
         
-        # Expand indices for take_along_axis to select full H vectors
-        # Index shape for take_along_axis needs to be broadcastable with latents,
-        # selecting along k_dim_latents.
-        # E.g., if latents is (B,K,H), indices (B,1) -> expanded to (B,1,1) for axis=1.
-        best_idx_slice = sorted_indices[..., 0:1] # (*batch_dims_lp, 1)
-        # Add dummy dims to match rank of latents up to H dim, for H selection.
-        # Number of dummy dims = latents.ndim - best_idx_slice.ndim - 1 (for H)
-        num_dummy_dims_for_H = latents.ndim - best_idx_slice.ndim -1
-        best_idx_expanded = best_idx_slice
-        for _ in range(num_dummy_dims_for_H): # Should be 0 if batch_dims match
-            best_idx_expanded = best_idx_expanded[..., None]
-        best_idx_expanded = best_idx_expanded[..., None] # Final dim for H
-
+        # Create an index for take_along_axis, needs to match rank of latents for non-indexed dims
+        # and select 1 from K_dim_latents, and keep H dim.
+        # Example: latents (B1,B2,K,H), log_probs (B1,B2,K)
+        # sorted_indices (B1,B2,K). best_idx_slice (B1,B2,1)
+        # best_idx_expanded needs to be (B1,B2,1,1) to gather from (B1,B2,K,H) along axis K (axis=2 here)
+        
+        best_idx_slice = jax.lax.slice_in_dim(sorted_indices, 0, 1, axis=k_dim_log_probs) # Gets first index
+        
+        # Construct shape for expanded index, e.g. (*log_probs.shape[:-1], 1 for K_slice, 1 for H_dummy)
+        idx_expanded_shape = list(log_probs.shape[:-1]) + [1,1]
+        
+        best_idx_expanded = jnp.reshape(best_idx_slice, idx_expanded_shape)
         best_ctx = jnp.take_along_axis(latents, best_idx_expanded, axis=k_dim_latents).squeeze(axis=k_dim_latents)
         
         second_best_ctx = best_ctx 
         if sorted_indices.shape[k_dim_log_probs] > 1:
-            second_idx_slice = sorted_indices[..., 1:2]
-            second_idx_expanded = second_idx_slice
-            for _ in range(num_dummy_dims_for_H):
-                second_idx_expanded = second_idx_expanded[..., None]
-            second_idx_expanded = second_idx_expanded[..., None]
+            second_idx_slice = jax.lax.slice_in_dim(sorted_indices, 1, 2, axis=k_dim_log_probs) # Gets second index
+            second_idx_expanded = jnp.reshape(second_idx_slice, idx_expanded_shape)
             second_best_ctx = jnp.take_along_axis(latents, second_idx_expanded, axis=k_dim_latents).squeeze(axis=k_dim_latents)
         return best_ctx, second_best_ctx
 
@@ -490,7 +483,8 @@ class LPN(nn.Module):
         col_lp = jnp.take_along_axis(col_all_lp, num_cols[..., None] - 1, axis=-1).squeeze(axis=-1)
         
         last_non_pad_lgts = self._get_last_non_padded_logits(grid_logits, num_cols[..., None, None])
-        if max_cols > 0 and grid_logits.shape[-2] >= max_cols and last_non_pad_lgts.shape[-2] > 0:
+        if max_cols > 0 and grid_logits.shape[-2] >= max_cols and \
+           hasattr(last_non_pad_lgts, 'shape') and last_non_pad_lgts.shape[-2] > 0:
             grid_logits = grid_logits.at[..., max_cols::max_cols, :].set(last_non_pad_lgts)
 
         grid_all_lp = jax.nn.log_softmax(grid_logits, axis=-1)
@@ -499,12 +493,11 @@ class LPN(nn.Module):
 
         lp_per_pair = row_lp + col_lp + grid_log_prob_weight * avg_grid_lp
         
-        # Sum over N_p (pairs for eval dimension, which is axis -1 of lp_per_pair after batch dims)
-        # If lp_per_pair is (*B_outer, N_p), sum over N_p.
-        # B_outer could be empty if not batched further.
-        n_p_axis = -1 if lp_per_pair.ndim > 0 else 0 # Handle scalar case (not expected)
-        if lp_per_pair.ndim == 0: # Scalar output, no sum needed
-             return lp_per_pair
+        # Sum over N_p (pairs for eval dimension)
+        # lp_per_pair could be e.g. (*batch_dims_of_decoder_input, N_eval_pairs)
+        # Summing last dim (N_eval_pairs)
+        n_p_axis = -1 
+        if lp_per_pair.ndim == 0: return lp_per_pair # Should not happen if N_eval_pairs > 0
 
         if use_product_score: 
 	        total_lp = jnp.log(jnp.clip(jnp.exp(lp_per_pair).prod(axis=n_p_axis), a_min=1e-10))
@@ -513,73 +506,37 @@ class LPN(nn.Module):
         return total_lp
 
     def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:
+        # Vectorized version
         max_rows_cfg, max_cols_cfg = self.decoder.config.max_rows, self.decoder.config.max_cols
 
         if max_rows_cfg <= 1:
-            # Handles cases where no previous rows exist to copy from.
-            # Shape: (*batch_dims_of_grid_logits, 0, vocab_size)
             return jnp.zeros((*grid_logits.shape[:-2], 0, grid_logits.shape[-1]), dtype=grid_logits.dtype)
 
-        num_cols_int = num_cols.astype(jnp.int32) # Shape e.g. (*B, N, 1, 1)
-
-        # `i_values` represents the target row index (1-indexed) for which we are finding the EOL logit of the *previous* row.
-        # The loop was `for i in range(1, max_rows_cfg)`.
-        # These `i` values determine which previous row's end-of-line logit to pick.
-        # The logit picked at unrolled loop step `i` is for filling the start of row `i` (0-indexed: row `i`).
-        # So we need `max_rows_cfg - 1` such logits if `max_rows_cfg > 1`.
+        num_cols_int = num_cols.astype(jnp.int32) # Expected shape e.g. (*B, N, 1, 1)
         
-        # i_values: (max_rows_cfg - 1), e.g., [1, 2, ..., max_rows_cfg-1]
-        # This `i` corresponds to the `i` in the original loop.
         i_values = jnp.arange(1, max_rows_cfg) # Shape: (max_rows_cfg-1,)
 
-        # Expand i_values to be broadcastable with num_cols_int and grid_logits batch dims.
-        # num_cols_int: (*B, N, 1, 1) or similar. Let's assume grid_logits is (*B_dims, Seq, Vocab)
-        # and num_cols_int is (*B_dims, 1, 1) effectively for broadcasting.
-        # We want indices to be calculated for each item in B_dims and for each i_value.
-        # Target shape for `indices_to_gather`: (*B_dims, max_rows_cfg-1, 1)
+        # Reshape i_values to broadcast with num_cols_int
+        # target shape for i_values_rsh: (*(1,)*(num_cols_int.ndim-1), max_rows_cfg-1) then add [...,None] for index calculation
+        # e.g., if num_cols_int is (B,N,1,1), i_values_rsh becomes (1,1,R-1,1)
+        shape_for_i_vals_rsh = [1] * (num_cols_int.ndim -1) + [max_rows_cfg-1]
+        i_vals_rsh = i_values.reshape(shape_for_i_vals_rsh)
         
-        # Make i_values broadcastable: (1, ..., 1, max_rows_cfg-1, 1) to align with num_cols_int for broadcasting
-        # num_cols_int could be (*batch_dims, 1, 1) where *batch_dims matches grid_logits.
-        # i_values needs to be reshaped to allow broadcasting with num_cols_int.
-        # Example: num_cols_int (B,N,1,1), i_values (R-1,). Reshape i_values to (1,1,R-1,1) for broadcasting.
-        # Or, simpler: calculate indices assuming broadcasting works element-wise for i_values.
+        # indices: shape will be e.g. (*B, N, max_rows_cfg-1, 1)
+        indices = max_cols_cfg * i_vals_rsh[..., None] - (max_cols_cfg - num_cols_int)
         
-        # indices: shape will be `num_cols_int.shape` with an added dim for `i_values` if `i_values` is broadcast correctly.
-        # `index = max_cols_cfg * i - (max_cols_cfg - num_cols_int)`
-        # `i` is effectively (max_rows_cfg-1,). `num_cols_int` is (*B,N,1,1).
-        # After broadcasting i_values, `indices` will be (*B,N,max_rows_cfg-1,1)
-        indices = max_cols_cfg * i_values[..., None] - (max_cols_cfg - num_cols_int)
-        
-        # Clip indices
         seq_len_of_grid_logits = grid_logits.shape[-2]
         safe_indices = jnp.clip(indices, 0, seq_len_of_grid_logits - 1)
-        # safe_indices is now, e.g., (*B, N, max_rows_cfg-1, 1)
-
-        # grid_logits is (*B, N, Seq, Vocab)
-        # We want to gather `max_rows_cfg-1` logit vectors.
-        # `jnp.take_along_axis` will gather along axis -2 (Seq dim).
-        # Input `grid_logits`:    (...,      Seq,          Vocab)
-        # Input `safe_indices`:   (..., num_indices, 1)  (num_indices = max_rows_cfg-1)
-        # Output should be:       (..., num_indices, Vocab)
         
-        # Ensure safe_indices has a final singleton dim if it's just for indexing, not slicing.
-        # The formula already makes it (*B,N,max_rows_cfg-1,1) so it's fine.
-        
+        # grid_logits: (*B, N, Seq, Vocab). safe_indices: (*B, N, R-1, 1)
+        # take_along_axis along Seq dim (axis=-2)
         gathered_logits = jnp.take_along_axis(grid_logits, safe_indices, axis=-2)
-        # gathered_logits should be (*B, N, max_rows_cfg-1, Vocab)
-        
-        # The original code concatenates these along axis=-2.
-        # This `gathered_logits` already has them effectively concatenated along the `max_rows_cfg-1` dimension.
-        # If the usage `grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)`
-        # expects `last_non_padded_logits` to have a flat sequence dimension that matches the number of
-        # elements being set (which is `max_rows_cfg - 1` if `max_cols::max_cols` selects that many start-of-row positions),
-        # then the shape `(*B, N, max_rows_cfg-1, Vocab)` is correct.
-        
+        # gathered_logits: (*B, N, R-1, Vocab)
         return gathered_logits
-        
+    
     def _get_random_search_context(
         self, latents_to_search_from, pairs_for_eval, grid_shapes_for_eval, key,
-        num_samples: int, scale: float, scan_batch_size: Optional[int] = None,
+        num_samples: int, scale: float, scan_batch_size: Optional[int] = None, 
         include_mean_latent: bool = True, include_all_latents: bool = False, **kwargs
     ) -> tuple[chex.Array, chex.Array]:
 
@@ -595,44 +552,57 @@ class LPN(nn.Module):
 
         def log_probs_fn_search_local(candidate_k_latent, inp_seq_Neval, out_seq_Neval, decoder_instance):
             num_N_eval = inp_seq_Neval.shape[-2] 
-            # candidate_k_latent: (*B_cand, H)
-            # inp_seq_Neval: (*B_inp, N_eval, SeqLen)
-            # Assume B_cand == B_inp. Tile candidate_k_latent for N_eval.
-            # (*B, H) -> (*B, 1, H) -> (*B, N_eval, H)
             lead_dims_cand_local = candidate_k_latent.shape[:-1]
-            cand_exp_local = jnp.expand_dims(candidate_k_latent, axis=len(lead_dims_cand_local))
-            
-            tile_reps_local = [1]*cand_exp_local.ndim
-            tile_reps_local[len(lead_dims_cand_local)] = num_N_eval
-            latents_k_for_Neval = jnp.tile(cand_exp_local, tile_reps_local)
+            # Ensure candidate_k_latent is at least 1D (for H) for expand_dims
+            if candidate_k_latent.ndim == 1: # Single H vector
+                cand_exp_local = candidate_k_latent[None, :] # (1,H)
+                lead_dims_cand_local = cand_exp_local.shape[:-1] # (1,)
+            else: # Already batched, e.g. (*B,H)
+                cand_exp_local = candidate_k_latent
+
+            # Expand for N_eval
+            # (*B,H) -> (*B,1,H) -> (*B,N_eval,H)
+            # axis_to_expand = len(lead_dims_cand_local) # after B_dims, before H
+            # cand_exp_for_N = jnp.expand_dims(cand_exp_local, axis=axis_to_expand)
+
+            # More robust expansion based on ndims
+            if cand_exp_local.ndim == inp_seq_Neval.ndim -1: # cand (B,H), inp (B,N,S)
+                 axis_to_expand = cand_exp_local.ndim -1
+                 cand_exp_for_N = jnp.expand_dims(cand_exp_local, axis=axis_to_expand)
+            elif cand_exp_local.ndim == inp_seq_Neval.ndim: # cand (B,1,H), inp (B,N,S) - if K=1 was kept
+                 cand_exp_for_N = cand_exp_local # Assume it is (B,1,H) and will broadcast with (B,N,S) for N
+            else: # Fallback or error
+                 raise ValueError("Shape mismatch between candidate latent and input sequences for tiling.")
+
+
+            tile_reps_local = [1]*cand_exp_for_N.ndim
+            # Identify the dimension that needs tiling to num_N_eval
+            # If cand_exp_for_N is (B,1,H), tile axis at len(lead_dims_cand_local) if that's the '1'
+            # Assuming inp_seq_Neval is (*B_shared, N_eval, S)
+            # cand_exp_for_N must be (*B_shared, 1, H) to be tiled to (*B_shared, N_eval, H)
+            # Tiling dim is usually inp_seq_Neval.ndim - 2 (the N_eval dim) if cand_exp_for_N matches batch structure.
+            # Here, lead_dims_cand_local already accounts for B_shared.
+            tile_dim_idx = len(lead_dims_cand_local) # This is the '1' dim in (*B,1,H)
+            tile_reps_local[tile_dim_idx] = num_N_eval
+            latents_k_for_Neval = jnp.tile(cand_exp_for_N, tile_reps_local)
 
             r_logits, c_logits, g_logits = decoder_instance(
                 inp_seq_Neval, out_seq_Neval, latents_k_for_Neval, dropout_eval=True
             )
             return self._compute_log_probs(r_logits, c_logits, g_logits, out_seq_Neval)
-
-        # Vmap over K_candidates dim. all_candidate_latents shape: (*B_common, K_cand, H)
-        # inp_seq_eval shape: (*B_common, N_eval, Seq)
-        # We need to determine the axis of K_cand.
-        # If all_candidate_latents has leading batch_dims matching inp_seq_eval, K_cand is at len(batch_dims).
         
-        # Determine number of shared batch dimensions
         num_shared_batch_dims = 0
-        for d1, d2 in zip(all_candidate_latents.shape, input_seq_eval.shape):
-            if d1 == d2:
+        min_ndims = min(all_candidate_latents.ndim, input_seq_eval.ndim)
+        for i in range(min_ndims):
+            if all_candidate_latents.shape[i] == input_seq_eval.shape[i]: 
                 num_shared_batch_dims += 1
-            else:
-                break
-        
-        vmap_axis_for_K_dim = num_shared_batch_dims # K_cand is the first differing dimension
+            else: break
+        vmap_axis_for_K_dim = num_shared_batch_dims
 
         log_probs_all_K = jax.vmap(
             log_probs_fn_search_local, 
-            in_axes=(vmap_axis_for_K_dim, # Axis of K in all_candidate_latents
-                     None,               # Broadcast input_seq_eval
-                     None,               # Broadcast output_seq_eval
-                     None),              # Broadcast decoder instance
-            out_axes=vmap_axis_for_K_dim # Output has K at the same axis position
+            in_axes=(vmap_axis_for_K_dim, None, None, None),
+            out_axes=vmap_axis_for_K_dim 
         )(all_candidate_latents, input_seq_eval, output_seq_eval, self.decoder)
         
         best_ctx, second_best_ctx = LPN._select_best_and_second_best_latents(
@@ -659,17 +629,31 @@ class LPN(nn.Module):
 
         def log_probs_fn_ga_local(one_k_latent, inp_Neval, out_Neval, decoder_inst):
             num_N_eval = inp_Neval.shape[-2]
+            # Similar tiling logic as in _get_random_search_context's local log_prob_fn
             lead_dims_k = one_k_latent.shape[:-1]
-            k_exp = jnp.expand_dims(one_k_latent, axis=len(lead_dims_k))
-            tile_reps_ga = [1]*k_exp.ndim; tile_reps_ga[len(lead_dims_k)] = num_N_eval
-            latents_k_for_Neval = jnp.tile(k_exp, tile_reps_ga)
+            if one_k_latent.ndim == 1: k_exp = one_k_latent[None, :]
+            else: k_exp = one_k_latent
+            
+            if k_exp.ndim == inp_Neval.ndim -1:
+                 axis_to_exp = k_exp.ndim -1
+                 k_exp_for_N = jnp.expand_dims(k_exp, axis=axis_to_exp)
+            elif k_exp.ndim == inp_Neval.ndim:
+                 k_exp_for_N = k_exp
+            else: raise ValueError("Shape mismatch GA context")
+
+            tile_reps_ga = [1]*k_exp_for_N.ndim
+            tile_dim_idx_ga = len(k_exp.shape[:-1]) # lead_dims_k effectively
+            tile_reps_ga[tile_dim_idx_ga] = num_N_eval
+            latents_k_for_Neval = jnp.tile(k_exp_for_N, tile_reps_ga)
+
             r_lg, c_lg, g_lg = decoder_inst(inp_Neval, out_Neval, latents_k_for_Neval, dropout_eval=True)
             return self._compute_log_probs(r_lg, c_lg, g_lg, out_Neval, 
                                            use_product_score=kwargs.get("use_product_score",False))
 
         num_shared_batch_dims_ga = 0
-        for d1, d2 in zip(latents_prepared.shape, input_seq_eval.shape):
-            if d1 == d2: num_shared_batch_dims_ga += 1
+        min_ndims_ga = min(latents_prepared.ndim, input_seq_eval.ndim)
+        for i in range(min_ndims_ga):
+            if latents_prepared.shape[i] == input_seq_eval.shape[i]: num_shared_batch_dims_ga += 1
             else: break
         vmap_axis_K_prep_ga = num_shared_batch_dims_ga
 
@@ -680,41 +664,41 @@ class LPN(nn.Module):
         )
 
         current_lr_val = optax.cosine_decay_schedule(lr, num_steps, exponent=lr_schedule_exponent) if lr_schedule else lr
-        opt_chain = [optax.clip_by_global_norm(1.0)]
-        if optimizer == "sgd": opt_chain.append(optax.sgd(current_lr_val, **(optimizer_kwargs or {})))
-        elif optimizer == "adam": opt_chain.append(optax.adam(current_lr_val, eps_root=1e-8, **(optimizer_kwargs or {})))
+        opt_chain_list = [optax.clip_by_global_norm(1.0)]
+        if optimizer == "sgd": opt_chain_list.append(optax.sgd(current_lr_val, **(optimizer_kwargs or {})))
+        elif optimizer == "adam": opt_chain_list.append(optax.adam(current_lr_val, eps_root=1e-8, **(optimizer_kwargs or {})))
         else: raise ValueError(f"Unsupported optimizer: {optimizer}")
-        optax_opt = optax.chain(*opt_chain)
+        optax_opt = optax.chain(*opt_chain_list)
         
         opt_state = optax_opt.init(latents_prepared)
 
         ga_latents = latents_prepared
-        # Get initial log_probs for t=0
         initial_log_probs_k, _ = value_and_grad_vmapped(ga_latents, input_seq_eval, output_seq_eval, self.decoder)
         history_latents = [ga_latents]
         history_log_probs = [initial_log_probs_k]
 
-
-        for i_step in range(num_steps):
-            # Use log_probs from previous step if already computed, else compute.
-            # For step 0, grads are from initial_log_probs_k computation.
-            # For subsequent, compute fresh.
+        for _ in range(num_steps):
             log_probs_val_k, grads_val_k = value_and_grad_vmapped(ga_latents, input_seq_eval, output_seq_eval, self.decoder)
             if stop_gradient_latent_move: grads_val_k = jax.lax.stop_gradient(grads_val_k)
-            
             updates_val_k, opt_state = optax_opt.update(-grads_val_k, opt_state, ga_latents)
-            ga_latents = ga_latents + updates_val_k # Ensure new array for history
+            ga_latents = ga_latents + updates_val_k 
             history_latents.append(ga_latents)
-            # Compute log_probs for the new latents to store.
             current_step_log_probs_k, _ = value_and_grad_vmapped(ga_latents, input_seq_eval, output_seq_eval, self.decoder)
             history_log_probs.append(current_step_log_probs_k)
             
-        all_versions_latents = jnp.stack(history_latents, axis=vmap_axis_K_prep_ga + 1) 
-        num_batch_dims_lp = len(latents_prepared.shape[:-2])
+        # Axis for stacking (versions axis) should be after K_prep dim.
+        # If latents_prepared is (B, K, H), K is at vmap_axis_K_prep_ga.
+        # Stack to (B, K, num_versions, H) -> axis = vmap_axis_K_prep_ga + 1
+        # If latents_prepared is (K,H) (B is 0), K is at 0. Stack to (K, num_versions, H) -> axis = 1.
+        stack_axis = vmap_axis_K_prep_ga + 1
+
+        all_versions_latents = jnp.stack(history_latents, axis=stack_axis) 
+        num_batch_dims_lp = len(latents_prepared.shape[:-2]) # B* dims before K,H
+        # New shape will have B* dims, then K*num_versions, then H
         final_shape_latents = (*latents_prepared.shape[:num_batch_dims_lp], -1, latents_prepared.shape[-1])
         collated_candidate_latents = jnp.reshape(all_versions_latents, final_shape_latents)
 
-        all_versions_log_probs = jnp.stack(history_log_probs, axis=vmap_axis_K_prep_ga + 1)
+        all_versions_log_probs = jnp.stack(history_log_probs, axis=stack_axis)
         final_shape_log_probs = (*history_log_probs[0].shape[:num_batch_dims_lp], -1)
         collated_log_probs = jnp.reshape(all_versions_log_probs, final_shape_log_probs)
         
@@ -723,16 +707,12 @@ class LPN(nn.Module):
         )
         return best_ctx, second_best_ctx
 
-# Main block from original file (for testing, if needed)
+# Main block
 if __name__ == "__main__":
-    from src.models.utils import TransformerLayerConfig
+    from src.models.utils import TransformerLayerConfig 
 
-    batch_size = 4
-    mini_batch_size_N = 3 
-    max_rows_val = 5
-    max_cols_val = 5
-    vocab_size_val = 10
-    hidden_size_H = 96 
+    batch_size = 4; mini_batch_size_N = 3; max_rows_val = 5; max_cols_val = 5
+    vocab_size_val = 10; hidden_size_H = 96 
 
     encoder_config_test = EncoderTransformerConfig(
         vocab_size=vocab_size_val, max_rows=max_rows_val, max_cols=max_cols_val,
@@ -744,45 +724,39 @@ if __name__ == "__main__":
         transformer_layer=TransformerLayerConfig(dropout_rate=0.0, hidden_size=hidden_size_H, num_heads=4, mlp_size=128),
         hidden_size=hidden_size_H, 
     )
-
     encoder_test_module = EncoderTransformer(encoder_config_test)
     decoder_test_module = DecoderTransformer(decoder_config_test)
     lpn_test_model = LPN(encoder=encoder_test_module, decoder=decoder_test_module)
-
     key_main = jax.random.PRNGKey(0)
-    key_pairs, key_shapes, key_init, key_dropout, key_gen_main = jax.random.split(key_main, 5) # Renamed key_gen
+    key_pairs, key_shapes, key_init_master, key_dropout_master, key_gen_main = jax.random.split(key_main, 5)
 
-    test_pairs = jax.random.randint(
-        key_pairs, (batch_size, mini_batch_size_N, max_rows_val, max_cols_val, 2),
-        minval=0, maxval=vocab_size_val,
-    )
-    test_grid_shapes = jax.random.randint(
-        key_shapes, (batch_size, mini_batch_size_N, 2, 2),
-        minval=1, maxval=min(max_rows_val, max_cols_val) + 1,
-    )
+    test_pairs = jax.random.randint(key_pairs, (batch_size, mini_batch_size_N, max_rows_val, max_cols_val, 2), 0, vocab_size_val)
+    test_grid_shapes = jax.random.randint(key_shapes, (batch_size, mini_batch_size_N, 2, 2), 1, min(max_rows_val, max_cols_val) + 1)
     
     print("Initializing LPN model...")
+    # Define all RNG keys potentially used by make_rng in init
+    # `params` is default. Others if make_rng("...") is called.
+    init_rng_keys = ['params', 'latents', 'latents_init', 'random_search', 'gradient_ascent_random_perturbation', 'dropout']
+    init_rng_values = jax.random.split(key_init_master, len(init_rng_keys))
+    init_rngs = {name: val for name, val in zip(init_rng_keys, init_rng_values)}
+    
     variables_lpn = lpn_test_model.init(
-        key_init, test_pairs, test_grid_shapes, 
+        init_rngs, test_pairs, test_grid_shapes, 
         dropout_eval=False, mode="mean", use_cross_attention=False, 
         prior_kl_coeff=1e-4, pairwise_kl_coeff=1e-4
     )
     num_params = sum(p.size for p in jax.tree_util.tree_leaves(variables_lpn["params"]))
     print(f"LPN Number of parameters: {num_params:,}")
 
-    # Define RNG keys needed by make_rng inside the model for different purposes
-    apply_rngs = {"dropout": key_dropout, "latents": jax.random.fold_in(key_dropout,1), 
-                  "latents_init":jax.random.fold_in(key_dropout,2), 
-                  "random_search":jax.random.fold_in(key_dropout,3), 
-                  "gradient_ascent_random_perturbation":jax.random.fold_in(key_dropout,4)}
-
+    apply_rng_keys = ['dropout', 'latents', 'latents_init', 'random_search', 'gradient_ascent_random_perturbation']
+    apply_rng_values = jax.random.split(key_dropout_master, len(apply_rng_keys))
+    apply_rngs = {name: val for name, val in zip(apply_rng_keys, apply_rng_values)}
 
     print("\nTesting __call__ with use_cross_attention=True, mode='mean'")
     loss_ca_mean, _ = lpn_test_model.apply(
         variables_lpn, test_pairs, test_grid_shapes,
         dropout_eval=False, mode="mean", use_cross_attention=True,
-        rngs=apply_rngs, 
-        prior_kl_coeff=1e-4, pairwise_kl_coeff=1e-4
+        rngs=apply_rngs, prior_kl_coeff=1e-4, pairwise_kl_coeff=1e-4
     )
     print(f"CA Mean Loss: {loss_ca_mean}")
 
@@ -791,29 +765,27 @@ if __name__ == "__main__":
     gen_input_grid_shape = test_grid_shapes[:, 0, 0, :] 
 
     gen_out_grids, gen_out_shapes, _ = lpn_test_model.apply(
-        variables_lpn,
-        method=lpn_test_model.generate_output, 
-        pairs=test_pairs, 
-        grid_shapes=test_grid_shapes, 
-        input=gen_input_grid, 
-        input_grid_shape=gen_input_grid_shape, 
-        key=key_gen_main, # Master key for generate_output
-        dropout_eval=True, 
-        mode="first", 
-        use_cross_attention=True,
-        return_two_best=False,
+        variables_lpn, method=lpn_test_model.generate_output, 
+        pairs=test_pairs, grid_shapes=test_grid_shapes, 
+        input=gen_input_grid, input_grid_shape=gen_input_grid_shape, 
+        key=key_gen_main, dropout_eval=True, mode="first", 
+        use_cross_attention=True, return_two_best=False,
         rngs=apply_rngs 
     )
     print(f"Generated output grids shape (CA, first): {gen_out_grids.shape}")
     print(f"Generated output shapes shape (CA, first): {gen_out_shapes.shape}")
 
     print("\n--- Original __main__ tests (for reference, use_cross_attention=False) ---")
+    @partial(jax.jit, static_argnames=["dropout_eval", "mode", "use_cross_attention"])
+    def apply_lpn_jitted(variables, p, gs, drp_eval, m, use_ca, rngs_dict, prior_c, pairwise_c):
+        return lpn_test_model.apply(variables, p, gs, dropout_eval=drp_eval, mode=m, use_cross_attention=use_ca,
+                                    rngs=rngs_dict, prior_kl_coeff=prior_c, pairwise_kl_coeff=pairwise_c)
+
     print("Original Mean Loss (CA=False):")
-    loss_orig_mean, _ = jax.jit(lpn_test_model.apply, static_argnames=["dropout_eval", "mode", "use_cross_attention"])(
+    loss_orig_mean, _ = apply_lpn_jitted(
         variables_lpn, test_pairs, test_grid_shapes,
-        dropout_eval=False, mode="mean", use_cross_attention=False, 
-        rngs=apply_rngs,
-        prior_kl_coeff=1e-4, pairwise_kl_coeff=1e-4,
+        drp_eval=False, m="mean", use_ca=False, 
+        rngs_dict=apply_rngs, prior_c=1e-4, pairwise_c=1e-4,
     )
     print(f"Original Mean Loss: {loss_orig_mean}")
     print("--- End of __main__ example ---")
