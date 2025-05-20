@@ -528,9 +528,9 @@ class LPN(nn.Module):
         # grid_logits: (*batch_dims_grid, SeqLen, VocabSize)
         # safe_indices:(*batch_dims_grid, L,      1)
         # axis=-2 refers to SeqLen dimension of grid_logits.
-        jax_print("grid_logits shape: {}", grid_logits.shape)
-        jax_print("safe_indices shape: {}", safe_indices.shape)
-        jax_print("safe_indices value (first few): {}", safe_indices[0,0,0,:5])
+        # jax_print("grid_logits shape: {}", grid_logits.shape)
+        # jax_print("safe_indices shape: {}", safe_indices.shape)
+        # jax_print("safe_indices value (first few): {}", safe_indices[0,0,0,:5])
         gathered_logits = jnp.take_along_axis(grid_logits, safe_indices, axis=-2)
         # gathered_logits: (*batch_dims_grid, L, VocabSize)
         return gathered_logits
