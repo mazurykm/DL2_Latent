@@ -420,32 +420,37 @@ class LPN(nn.Module):
 
     @staticmethod
     def _select_best_and_second_best_latents(
-        log_probs: chex.Array, latents: chex.Array 
+        log_probs: chex.Array, # Shape: (*batch_dims, K)
+        latents: chex.Array    # Shape: (*batch_dims, K, H)
     ) -> tuple[chex.Array, chex.Array]:
-        k_dim_log_probs = log_probs.ndim - 1 
+        # k_dim_log_probs is the last dimension of log_probs
+        k_dim_log_probs = log_probs.ndim - 1
+        # k_dim_latents is the dimension before H in latents
         k_dim_latents = latents.ndim - 2
 
+        # Ensure batch dimensions match
+        assert log_probs.shape[:-1] == latents.shape[:-2], \
+            f"Batch dimensions mismatch: log_probs {log_probs.shape[:-1]}, latents {latents.shape[:-2]}"
+
         sorted_indices = jnp.argsort(log_probs, axis=k_dim_log_probs, descending=True)
+        # sorted_indices shape: (*batch_dims, K)
+
+        # Select index for the best K: shape (*batch_dims, 1)
+        best_k_index_slice = jax.lax.slice_in_dim(sorted_indices, start_index=0, limit_index=1, axis=k_dim_log_probs)
         
-        # Create an index for take_along_axis, needs to match rank of latents for non-indexed dims
-        # and select 1 from K_dim_latents, and keep H dim.
-        # Example: latents (B1,B2,K,H), log_probs (B1,B2,K)
-        # sorted_indices (B1,B2,K). best_idx_slice (B1,B2,1)
-        # best_idx_expanded needs to be (B1,B2,1,1) to gather from (B1,B2,K,H) along axis K (axis=2 here)
+        # Expand for H dimension for take_along_axis: shape (*batch_dims, 1, 1)
+        best_k_index_expanded = best_k_index_slice[..., None]
         
-        best_idx_slice = jax.lax.slice_in_dim(sorted_indices, 0, 1, axis=k_dim_log_probs) # Gets first index
+        # Gather along K dimension of latents
+        best_ctx = jnp.take_along_axis(latents, best_k_index_expanded, axis=k_dim_latents).squeeze(axis=k_dim_latents)
+        # Squeezing k_dim_latents (which was size 1) results in shape (*batch_dims, H)
         
-        # Construct shape for expanded index, e.g. (*log_probs.shape[:-1], 1 for K_slice, 1 for H_dummy)
-        idx_expanded_shape = list(log_probs.shape[:-1]) + [1,1]
-        
-        best_idx_expanded = jnp.reshape(best_idx_slice, idx_expanded_shape)
-        best_ctx = jnp.take_along_axis(latents, best_idx_expanded, axis=k_dim_latents).squeeze(axis=k_dim_latents)
-        
-        second_best_ctx = best_ctx 
-        if sorted_indices.shape[k_dim_log_probs] > 1:
-            second_idx_slice = jax.lax.slice_in_dim(sorted_indices, 1, 2, axis=k_dim_log_probs) # Gets second index
-            second_idx_expanded = jnp.reshape(second_idx_slice, idx_expanded_shape)
-            second_best_ctx = jnp.take_along_axis(latents, second_idx_expanded, axis=k_dim_latents).squeeze(axis=k_dim_latents)
+        second_best_ctx = best_ctx # Default if only one candidate
+        if sorted_indices.shape[k_dim_log_probs] > 1: # If there are at least two candidates
+            second_k_index_slice = jax.lax.slice_in_dim(sorted_indices, start_index=1, limit_index=2, axis=k_dim_log_probs)
+            second_k_index_expanded = second_k_index_slice[..., None]
+            second_best_ctx = jnp.take_along_axis(latents, second_k_index_expanded, axis=k_dim_latents).squeeze(axis=k_dim_latents)
+            
         return best_ctx, second_best_ctx
 
     def _compute_log_probs(
