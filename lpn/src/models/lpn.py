@@ -506,32 +506,52 @@ class LPN(nn.Module):
         return total_lp
 
     def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:
-        # Vectorized version
+        # grid_logits: (*batch_dims_grid, SeqLen, VocabSize)
+        # num_cols: (*batch_dims_num_cols, 1, 1), where batch_dims_grid == batch_dims_num_cols
         max_rows_cfg, max_cols_cfg = self.decoder.config.max_rows, self.decoder.config.max_cols
 
         if max_rows_cfg <= 1:
             return jnp.zeros((*grid_logits.shape[:-2], 0, grid_logits.shape[-1]), dtype=grid_logits.dtype)
 
-        num_cols_int = num_cols.astype(jnp.int32) # Expected shape e.g. (*B, N, 1, 1)
+        num_cols_int = num_cols.astype(jnp.int32) 
         
-        i_values = jnp.arange(1, max_rows_cfg) # Shape: (max_rows_cfg-1,)
+        i_values = jnp.arange(1, max_rows_cfg) # Shape: (L,) where L = max_rows_cfg-1
 
-        # Reshape i_values to broadcast with num_cols_int
-        # target shape for i_values_rsh: (*(1,)*(num_cols_int.ndim-1), max_rows_cfg-1) then add [...,None] for index calculation
-        # e.g., if num_cols_int is (B,N,1,1), i_values_rsh becomes (1,1,R-1,1)
-        shape_for_i_vals_rsh = [1] * (num_cols_int.ndim -1) + [max_rows_cfg-1]
-        i_vals_rsh = i_values.reshape(shape_for_i_vals_rsh)
+        # Reshape i_values to align for broadcasting with num_cols_int.
+        # num_cols_int shape: e.g. (B, N, 1, 1) -> ndim = 4
+        # i_values shape: (L,)
+        # We want `term_from_i = max_cols_cfg * i_values` to be effectively (1,1,L,1) to broadcast with (B,N,1,1)
+        # So, i_values needs to be reshaped to (L,) then make it (1,1,L,1) for term1.
+        # This means creating `L` versions of `num_cols_int` implicitly.
         
-        # indices: shape will be e.g. (*B, N, max_rows_cfg-1, 1)
-        indices = max_cols_cfg * i_vals_rsh[..., None] - (max_cols_cfg - num_cols_int)
+        # Let's construct term1 from i_values.
+        # i_values has shape (L,). term1 needs to broadcast from right against num_cols_int.
+        # Shape of i_values for term1: e.g., (1, ..., 1, L, 1) where L is number of rows to gather.
+        # Number of leading singleton dims for i_values: num_cols_int.ndim - 2
+        # (because num_cols_int itself has two trailing singleton dims (1,1))
+        
+        # Example: num_cols_int is (B, N, 1, 1). ndim=4. num_cols_int.ndim-2 = 2.
+        # i_values_reshaped_for_term1 = i_values.reshape( (1,1, max_rows_cfg-1, 1) )
+        num_leading_ones = num_cols_int.ndim - 2
+        shape_for_i_values = (*([1]*num_leading_ones), max_rows_cfg-1, 1)
+        i_values_term_shape = i_values.reshape(shape_for_i_values)
+
+        indices = max_cols_cfg * i_values_term_shape - (max_cols_cfg - num_cols_int)
+        # Example shapes:
+        # i_values_term_shape: (1,1, L, 1) if num_cols_int was (B,N,1,1)
+        # num_cols_int:        (B,N, 1, 1)
+        # indices:             (B,N, L, 1)  -- This is 4D. This is correct.
         
         seq_len_of_grid_logits = grid_logits.shape[-2]
         safe_indices = jnp.clip(indices, 0, seq_len_of_grid_logits - 1)
+        # safe_indices: (*batch_dims_grid, L, 1)
         
-        # grid_logits: (*B, N, Seq, Vocab). safe_indices: (*B, N, R-1, 1)
-        # take_along_axis along Seq dim (axis=-2)
+        # grid_logits: (*batch_dims_grid, SeqLen, VocabSize)
+        # safe_indices:(*batch_dims_grid, L,      1)
+        # axis=-2 refers to SeqLen dimension of grid_logits.
+        # This matches example from JAX docs for take_along_axis.
         gathered_logits = jnp.take_along_axis(grid_logits, safe_indices, axis=-2)
-        # gathered_logits: (*B, N, R-1, Vocab)
+        # gathered_logits: (*batch_dims_grid, L, VocabSize)
         return gathered_logits
     
     def _get_random_search_context(
