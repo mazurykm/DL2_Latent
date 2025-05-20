@@ -14,6 +14,8 @@ from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.models.utils import EncoderTransformerConfig, DecoderTransformerConfig
 from src.data_utils import make_leave_one_out
 
+from jax.debug import print as jax_print # At top of file
+
 
 class LPN(nn.Module):
     encoder: EncoderTransformer
@@ -490,74 +492,48 @@ class LPN(nn.Module):
         if max_rows_cfg <= 1:
             return jnp.zeros((*grid_logits.shape[:-2], 0, grid_logits.shape[-1]), dtype=grid_logits.dtype)
 
-        num_cols_int = num_cols.astype(jnp.int32) # Shape e.g. (*B, N, 1, 1)
+        num_cols_int = num_cols.astype(jnp.int32) 
         
-        # We need to select logits for target rows starting from the second row (index 1) up to max_rows_cfg-1.
-        # The source of these logits is the end of the *previous* row (0 to max_rows_cfg-2).
-        # Let `prev_row_indices` be the 0-indexed numbers of these previous rows.
-        prev_row_indices = jnp.arange(0, max_rows_cfg - 1) # Shape: (L,), L = max_rows_cfg-1
+        i_values = jnp.arange(1, max_rows_cfg) # Shape: (L,) where L = max_rows_cfg-1
 
-        # Define a function to get the last logit for one previous_row_idx
-        def get_one_last_logit(prev_row_idx_scalar):
-            # prev_row_idx_scalar: a scalar from prev_row_indices
-            # num_cols_int: e.g. (*B, N, 1, 1)
-            # grid_logits: e.g. (*B, N, SeqLen, VocabSize)
-            
-            # Index in SeqLen dim: prev_row_idx_scalar * max_cols_cfg + (num_cols_int - 1)
-            # This index will have the batch dims of num_cols_int, e.g. (*B, N, 1, 1)
-            index_to_gather = prev_row_idx_scalar * max_cols_cfg + (num_cols_int - 1)
-            
-            seq_len_of_grid_logits = grid_logits.shape[-2]
-            safe_index_to_gather = jnp.clip(index_to_gather, 0, seq_len_of_grid_logits - 1)
-            # safe_index_to_gather has shape, e.g., (*B, N, 1, 1)
+        # Reshape i_values to align for broadcasting with num_cols_int.
+        # num_cols_int shape: e.g. (B, N, 1, 1) -> ndim = 4
+        # i_values shape: (L,)
+        # We want `term_from_i = max_cols_cfg * i_values` to be effectively (1,1,L,1) to broadcast with (B,N,1,1)
+        # So, i_values needs to be reshaped to (L,) then make it (1,1,L,1) for term1.
+        # This means creating `L` versions of `num_cols_int` implicitly.
+        
+        # Let's construct term1 from i_values.
+        # i_values has shape (L,). term1 needs to broadcast from right against num_cols_int.
+        # Shape of i_values for term1: e.g., (1, ..., 1, L, 1) where L is number of rows to gather.
+        # Number of leading singleton dims for i_values: num_cols_int.ndim - 2
+        # (because num_cols_int itself has two trailing singleton dims (1,1))
+        
+        # Example: num_cols_int is (B, N, 1, 1). ndim=4. num_cols_int.ndim-2 = 2.
+        # i_values_reshaped_for_term1 = i_values.reshape( (1,1, max_rows_cfg-1, 1) )
+        num_leading_ones = num_cols_int.ndim - 2
+        shape_for_i_values = (*([1]*num_leading_ones), max_rows_cfg-1, 1)
+        i_values_term_shape = i_values.reshape(shape_for_i_values)
 
-            # Gather from grid_logits along the SeqLen axis (axis=-2)
-            # Result for one prev_row_idx_scalar: (*B, N, 1, VocabSize)
-            one_logit_vector = jnp.take_along_axis(grid_logits, safe_index_to_gather, axis=-2)
-            return one_logit_vector
-
-        # Vmap this function over prev_row_indices
-        # prev_row_indices: (L,)
-        # `get_one_last_logit` takes scalar, num_cols_int and grid_logits are "closed over" or broadcast.
-        # If num_cols_int or grid_logits were also iterated, in_axes would reflect that.
-        # Here, they are treated as fixed for each call within vmap.
-        # `vmap` adds a new leading dimension for the vmapped output.
-        # So, `all_logit_vectors` will be (L, *B, N, 1, VocabSize)
-        all_logit_vectors_vmapped = jax.vmap(
-            get_one_last_logit, in_axes=0 # vmap over prev_row_idx_scalar
-        )(prev_row_indices)
+        indices = max_cols_cfg * i_values_term_shape - (max_cols_cfg - num_cols_int)
+        # Example shapes:
+        # i_values_term_shape: (1,1, L, 1) if num_cols_int was (B,N,1,1)
+        # num_cols_int:        (B,N, 1, 1)
+        # indices:             (B,N, L, 1)  -- This is 4D. This is correct.
         
-        # We need the result to be (*B, N, L, VocabSize) for the .set() operation.
-        # Current: (L, *B, N, 1, VocabSize). Squeeze the singleton dim first.
-        all_logit_vectors_squeezed = all_logit_vectors_vmapped.squeeze(axis=-2) # (L, *B, N, VocabSize)
+        seq_len_of_grid_logits = grid_logits.shape[-2]
+        safe_indices = jnp.clip(indices, 0, seq_len_of_grid_logits - 1)
+        # safe_indices: (*batch_dims_grid, L, 1)
         
-        # Move L dimension to the correct place: (*B, N, L, VocabSize)
-        # Source dims: (L_axis=0, B_axis=1, N_axis=2, V_axis=3) assuming *B is one dim
-        # Target dims: (B_axis=0, N_axis=1, L_axis=2, V_axis=3)
-        # This requires knowing the number of batch dimensions in grid_logits (*B, N part).
-        # grid_logits.ndim = len(batch_dims_grid) + 2 (SeqLen, Vocab)
-        # batch_dims_grid_count = grid_logits.ndim - 2
-        
-        # Let's assume grid_logits is (B, N, S, V) for simplicity of transpose axes.
-        # Then all_logit_vectors_squeezed is (L, B, N, V).
-        # Target is (B, N, L, V). Transpose: (1, 2, 0, 3)
-        # Generalizing: L is at axis 0. Batch dims (*B,N) are from axis 1 to 1+len(batch_dims_grid_logits_up_to_seqlen)-1.
-        # Vocab is last.
-        
-        num_batch_dims_of_grid_logits = grid_logits.ndim - 2 # Number of dims before Seq, Vocab
-        
-        # Transpose: move L from axis 0 to be after batch_dims_of_grid_logits
-        # axes order: current (0=L, 1..NBD = batch_dims, NBD+1 = Vocab) where NBD = num_batch_dims_of_grid_logits
-        # target: (1..NBD = batch_dims, 0=L, NBD+1 = Vocab)
-        current_axes = list(range(all_logit_vectors_squeezed.ndim)) # [0, 1, ..., NBD, NBD+1]
-        target_axes_order = current_axes[1 : num_batch_dims_of_grid_logits+1] + \
-                            [current_axes[0]] + \
-                            [current_axes[num_batch_dims_of_grid_logits+1]]
-        
-        gathered_logits_final_shape = jnp.transpose(all_logit_vectors_squeezed, axes=target_axes_order)
-        # Shape: (*batch_dims_grid, L, VocabSize)
-        
-        return gathered_logits_final_shape
+        # grid_logits: (*batch_dims_grid, SeqLen, VocabSize)
+        # safe_indices:(*batch_dims_grid, L,      1)
+        # axis=-2 refers to SeqLen dimension of grid_logits.
+        jax_print("grid_logits shape: {}", grid_logits.shape)
+        jax_print("safe_indices shape: {}", safe_indices.shape)
+        jax_print("safe_indices value (first few): {}", safe_indices[0,0,0,:5])
+        gathered_logits = jnp.take_along_axis(grid_logits, safe_indices, axis=-2)
+        # gathered_logits: (*batch_dims_grid, L, VocabSize)
+        return gathered_logits
     
     def _get_random_search_context(
         self, latents_to_search_from, pairs_for_eval, grid_shapes_for_eval, key,
