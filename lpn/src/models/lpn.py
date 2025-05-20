@@ -52,17 +52,25 @@ class LPN(nn.Module):
         print(f"using cross attention: {use_cross_attention}")
         if use_cross_attention:
             # Use cross attention to compute the context vector.
-            test_input = pairs[..., -1:, :, :, :]
-            test_shape = grid_shapes[..., -1:, :, :] 
-            support_latents = latents[..., :-1, :] 
+            H = latents.shape[-1]
+            sqrt_dh = jnp.sqrt(float(H))
 
-            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)  
-            query = test_latent[..., None, :]  
-            keys = support_latents 
-            values = support_latents
-            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
-            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
-            latents = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
+            # Query: Mean of all M samples. Shape (*B, 1, H)
+            query = latents.mean(axis=-2, keepdims=True)
+
+            # Key/Value are the latents themselves. Shape (*B, M, H)
+            key = latents
+            value = latents
+
+            # Attention scores. Shape (*B, 1, M)
+            attn_scores = jnp.einsum('...qh,...kh->...qk', query, key) / sqrt_dh
+
+            # Attention weights. Shape (*B, 1, M)
+            attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+            
+            # Weighted sum (attended context). Shape (*B, H)
+            latents = jnp.einsum('...qk,...kh->...qh', attn_weights, value).squeeze(axis=-2) 
+            
             latents = jnp.tile(latents[:, None, :], (1, pairs.shape[1], 1))
             leave_one_out_latents = make_leave_one_out(latents, axis=-2)
             if mode == "first":
@@ -417,7 +425,7 @@ class LPN(nn.Module):
 
             # Attention weights. Shape (*B, 1, M)
             attn_weights = jax.nn.softmax(attn_scores, axis=-1)
-            
+
             # Weighted sum (attended context). Shape (*B, H)
             latents = jnp.einsum('...qk,...kh->...qh', attn_weights, value).squeeze(axis=-2) 
             
