@@ -234,7 +234,7 @@ class LPN(nn.Module):
         dropout_eval: bool,
         mode: Literal["mean", "first", "random_search", "gradient_ascent"],
         return_two_best: bool = False,
-        use_cross_attention: bool = False, 
+        use_cross_attention: bool = True, 
         **mode_kwargs,
     ) -> Union[tuple[chex.Array, chex.Array, dict], tuple[chex.Array, chex.Array, chex.Array, chex.Array, dict]]:
         input_grid = input 
@@ -258,7 +258,7 @@ class LPN(nn.Module):
 
         source_latents_for_gen_modes = example_latents
 
-        print(f"1st generate output: Latents shape: {example_latents.shape}")
+        #print(f"1st generate output: Latents shape: {example_latents.shape}")
 
         if use_cross_attention:
             H = example_latents.shape[-1]
@@ -266,17 +266,18 @@ class LPN(nn.Module):
             query = example_latents.mean(axis=-2, keepdims=True)
             key_val_attn = example_latents
             attn_scores = jnp.einsum('...qh,...kh->...qk', query, key_val_attn) / sqrt_dh
-            attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+            attn_weights = jax.nn.softmax(attn_scores, axis=-1)        
             attended_context_gen = jnp.einsum('...qk,...kh->...qh', attn_weights, key_val_attn).squeeze(axis=-2)
+            #print(f"1.5nd generate output, after crossatt: Latents shape: {attended_context_gen.shape}")
             source_latents_for_gen_modes = attended_context_gen[..., None, :] 
-        
-        print(f"2nd generate output, after crossatt: Latents shape: {source_latents_for_gen_modes.shape}")
+
+        #print(f"2nd generate output, after crossatt: Latents shape: {source_latents_for_gen_modes.shape}")
 
         if mode == "mean":
             final_gen_context = source_latents_for_gen_modes.mean(axis=-2) 
             first_context, second_context = final_gen_context, final_gen_context
 
-            print(f"3rd generate output, after mean: Latents shape: {first_context.shape}")
+            #print(f"3rd generate output, after mean: Latents shape: {first_context.shape}")
 
         elif mode == "first":
             final_gen_context = source_latents_for_gen_modes[..., 0, :] 
@@ -403,8 +404,9 @@ class LPN(nn.Module):
             latents: latents from which to start the search. Shape (*B, 1, H), (*B, N, H), or (*B, N+1, H).
         """
         if include_mean_latent:
-            print(f"Preparing latents for search, Latents shape: {latents.shape}")
-            mean_latent = latents
+            #mean_latent = latents
+            mean_latent = latents.mean(axis=-2, keepdims=True)
+
             if include_all_latents:
                 # Include the mean latent in the latents from which to start the search.
                 prep_latents = jnp.concatenate([mean_latent, latents], axis=-2)
