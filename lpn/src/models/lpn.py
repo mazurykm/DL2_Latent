@@ -377,7 +377,7 @@ class LPN(nn.Module):
             info: dictionary of additional information.
         """
         latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
-
+        
         if latents_logvar is not None:
             assert key is not None, "'key' argument required for variational inference."
             key, key_latents = jax.random.split(key)
@@ -391,25 +391,37 @@ class LPN(nn.Module):
         
         if use_cross_attention:
             print("using cross attention")
-            test_input = jnp.stack([input, input], axis=-1)  # (*B, R, C, 2)
-            # Add singleton dimension to match pairs shape
-            test_input = test_input[:, None]  # (*B, 1, R, C, 2)
-            # For grid_shapes, we need (*B, 1, 2, 2) where the last dimension 
-            # represents rows and columns for input and output
-            input_rows, input_cols = input_grid_shape[:, 0:1], input_grid_shape[:, 1:2]
-            # Create with proper broadcasting shape
-            test_shape = jnp.zeros((*input.shape[:-2], 1, 2, 2), dtype=input_grid_shape.dtype)
-            test_shape = test_shape.at[..., 0, 0].set(input_rows)  # input rows
-            test_shape = test_shape.at[..., 0, 1].set(input_rows)  # output rows (same as input)
-            test_shape = test_shape.at[..., 1, 0].set(input_cols)  # input cols
-            test_shape = test_shape.at[..., 1, 1].set(input_cols)  # output cols (same as input)
-            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)
-            query = test_latent[..., None, :]  
-            keys = latents 
-            values = latents 
-            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1]) 
-            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
-            latents = jnp.matmul(attn_weights, values).squeeze(axis=-2) 
+            # test_input = jnp.stack([input, input], axis=-1)  
+            # test_input = test_input[:, None]
+            # test_shape = jnp.tile(input_grid_shape[:, None, None, :], (1, 1, 2, 1)) 
+            # test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2) 
+            # query = test_latent[..., None, :]  
+            # keys = latents 
+            # values = latents  
+            # attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1]) 
+            # attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
+            # latents = jnp.matmul(attn_weights, values).squeeze(axis=-2)
+            
+            H = latents.shape[-1]
+            sqrt_dh = jnp.sqrt(float(H))
+
+            # Query: Mean of all M samples. Shape (*B, 1, H)
+            query = latents.mean(axis=-2, keepdims=True)
+
+            # Key/Value are the latents themselves. Shape (*B, M, H)
+            key = latents
+            value = latents
+
+            # Attention scores. Shape (*B, 1, M)
+            attn_scores = jnp.einsum('...qh,...kh->...qk', query, key) / sqrt_dh
+
+            # Attention weights. Shape (*B, 1, M)
+            attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+            
+            # Weighted sum (attended context). Shape (*B, H)
+            latents = jnp.einsum('...qk,...kh->...qh', attn_weights, value).squeeze(axis=-2) 
+            
+            latents = jnp.tile(latents[:, None, :], (1, pairs.shape[1], 1))
             if mode == "first":
                 context = latents[..., 0, :]
                 first_context, second_context = context, context
