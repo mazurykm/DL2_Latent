@@ -462,14 +462,15 @@ class LPN(nn.Module):
             )
             return output_grids, output_shapes, info
 
+
     def _generate_output_from_context(
         self, context: chex.Array, input_grid: chex.Array, input_grid_shape: chex.Array, dropout_eval: bool
     ) -> tuple[chex.Array, chex.Array]:
-        # context: (*batch_dims, H) - This is guaranteed by generate_output's logic
+        # context: (*batch_dims, H)
         # input_grid: (*batch_dims, R, C)
         # input_grid_shape: (*batch_dims, 2)
 
-        batch_dims = input_grid.shape[:-2]
+        batch_dims = input_grid.shape[:-2] 
         H_dim = context.shape[-1]
 
         flattened_input_grid = jnp.reshape(input_grid, (*batch_dims, -1))
@@ -478,51 +479,63 @@ class LPN(nn.Module):
 
         s_len = input_seq_single.shape[-1]
         
-        # Add N=1 dimension for decoder compatibility
         input_seq_N1 = jnp.reshape(input_seq_single, (*batch_dims, 1, s_len))
         context_N1 = jnp.reshape(context, (*batch_dims, 1, H_dim))
         current_output_seq_N1 = jnp.reshape(output_seq_single_init, (*batch_dims, 1, s_len))
 
-        def grid_shape_step(output_seq_step_N1: chex.Array, row: bool) -> chex.Array:
+        # Inner function for predicting row/col shapes
+        def grid_shape_step_fn(output_seq_step_N1: chex.Array, row_flag: bool) -> chex.Array:
             pred_row_logits_N1, pred_col_logits_N1, _ = self.decoder(
                 input_seq_N1, output_seq_step_N1, context_N1, dropout_eval
             )
-            target_logits_N1 = pred_row_logits_N1 if row else pred_col_logits_N1
-            target_logits_single = target_logits_N1.squeeze(axis=-2) # Squeeze N=1 dim
-            new_token_single = jnp.argmax(target_logits_single, axis=-1).astype(output_seq_single_init.dtype) + 1
-            token_idx_to_set = 0 if row else 1
-            return output_seq_step_N1.at[..., token_idx_to_set].set(new_token_single)
-
-        current_output_seq_N1 = grid_shape_step(current_output_seq_N1, row=True)
-        current_output_seq_N1 = grid_shape_step(current_output_seq_N1, row=False)
-        
-        output_shapes_single = current_output_seq_N1[..., :2].squeeze(axis=-2)
-        max_cols = self.decoder.config.max_cols
-
-        def one_step_for_scan(carry_loop_output_seq_N1: chex.Array, token_pos_idx: int):
-            *_, pred_grid_logits_N1 = self.decoder(
-                input_seq_N1, carry_loop_output_seq_N1, context_N1, dropout_eval
-            )
-            num_cols_pred = output_shapes_single[..., 1].astype(jnp.int32)
-            is_new_row_start = (token_pos_idx % max_cols == 0) & (token_pos_idx > 0)
-            prev_row_end_idx_single = (token_pos_idx // max_cols - 1) * max_cols + num_cols_pred
-            current_token_direct_idx_single = jnp.full_like(num_cols_pred, token_pos_idx)
-            selected_idx_single = jnp.where(is_new_row_start, prev_row_end_idx_single, current_token_direct_idx_single)
+            target_logits_N1 = pred_row_logits_N1 if row_flag else pred_col_logits_N1
+            target_logits_single = target_logits_N1.squeeze(axis=-2) 
             
-            idx_for_take = jnp.reshape(selected_idx_single, (*batch_dims, 1, 1, 1))
-            selected_logits_N1 = jnp.take_along_axis(pred_grid_logits_N1, idx_for_take, axis=-2)
-            selected_logits_single = selected_logits_N1.squeeze(axis=(-3, -2))
-            new_token_val_single = jnp.argmax(selected_logits_single, axis=-1).astype(output_seq_single_init.dtype)
-            updated_loop_output_seq_N1 = carry_loop_output_seq_N1.at[..., 2 + token_pos_idx].set(new_token_val_single)
+            new_token_val_single = jnp.argmax(target_logits_single, axis=-1).astype(output_seq_single_init.dtype) + 1
+            # Expand new_token_val_single to match the slice shape for .set()
+            # If new_token_val_single is (*batch_dims,), slice is (*batch_dims,1)
+            # new_token_val_expanded shape should be (*batch_dims, 1)
+            new_token_val_expanded = new_token_val_single[..., None]
+
+            token_idx = 0 if row_flag else 1
+            return output_seq_step_N1.at[..., token_idx].set(new_token_val_expanded) # Use expanded
+
+        current_output_seq_N1 = grid_shape_step_fn(current_output_seq_N1, row_flag=True)
+        current_output_seq_N1 = grid_shape_step_fn(current_output_seq_N1, row_flag=False)
+        
+        output_shapes_predicted = current_output_seq_N1[..., :2].squeeze(axis=-2)
+        max_cols_cfg = self.decoder.config.max_cols
+
+        # Inner function for nn.scan to predict grid tokens
+        def scan_step_fn(loop_carry_output_seq_N1: chex.Array, grid_token_idx: int):
+            *_, pred_grid_lgts_N1 = self.decoder(
+                input_seq_N1, loop_carry_output_seq_N1, context_N1, dropout_eval
+            )
+            num_cols_val = output_shapes_predicted[..., 1].astype(jnp.int32)
+            is_start_of_new_row = (grid_token_idx % max_cols_cfg == 0) & (grid_token_idx > 0)
+            prev_row_end_log_idx = (grid_token_idx // max_cols_cfg - 1) * max_cols_cfg + num_cols_val
+            current_pos_log_idx = jnp.full_like(num_cols_val, grid_token_idx)
+            final_sel_idx_single = jnp.where(is_start_of_new_row, prev_row_end_log_idx, current_pos_log_idx)
+            idx_for_take_N1 = jnp.reshape(final_sel_idx_single, (*batch_dims, 1, 1, 1))
+            sel_logits_N1 = jnp.take_along_axis(pred_grid_lgts_N1, idx_for_take_N1, axis=-2)
+            sel_logits_single = sel_logits_N1.squeeze(axis=(-3, -2))
+            
+            new_grid_token_val_single = jnp.argmax(sel_logits_single, axis=-1).astype(output_seq_single_init.dtype)
+            # Expand new_grid_token_val_single for .set()
+            # Slice shape is (*batch_dims,1), new_grid_token_val_single is (*batch_dims,)
+            new_grid_token_val_expanded = new_grid_token_val_single[..., None]
+            
+            updated_loop_output_seq_N1 = loop_carry_output_seq_N1.at[..., 2 + grid_token_idx].set(new_grid_token_val_expanded) # Use expanded
             return updated_loop_output_seq_N1, None
 
-        final_output_seq_N1, _ = nn.scan(
-            one_step_for_scan, variable_broadcast="params", split_rngs={"params": False},
+        final_gen_output_seq_N1, _ = nn.scan(
+            scan_step_fn, variable_broadcast="params", split_rngs={"params": False},
         )(current_output_seq_N1, jnp.arange(self.decoder.config.max_len))
 
-        final_output_seq_single = final_output_seq_N1.squeeze(axis=-2)
-        output_grids = jnp.reshape(final_output_seq_single[..., 2:], input_grid.shape)
-        return output_grids, output_shapes_single
+        final_gen_output_seq_single = final_gen_output_seq_N1.squeeze(axis=-2)
+        output_grids_final = jnp.reshape(final_gen_output_seq_single[..., 2:], input_grid.shape)
+
+        return output_grids_final, output_shapes_predicted
 
     # _get_random_search_context and _get_gradient_ascent_context remain largely the same.
     # Their `latents` input shape is (*B, K, H) where K is num starting latents.
