@@ -648,8 +648,11 @@ class LPN(nn.Module):
             latents_k_for_Neval = jnp.tile(k_exp_for_N, tile_reps_ga)
 
             r_lg, c_lg, g_lg = decoder_inst(inp_Neval, out_Neval, latents_k_for_Neval, dropout_eval=True)
-            return self._compute_log_probs(r_lg, c_lg, g_lg, out_Neval, 
+            
+            log_probs_before_sum = self._compute_log_probs(r_lg, c_lg, g_lg, out_Neval, 
                                            use_product_score=kwargs.get("use_product_score",False))
+    
+            return jnp.sum(log_probs_before_sum) 
 
         num_shared_batch_dims_ga = 0
         min_ndims_ga = min(latents_prepared.ndim, input_seq_eval.ndim)
