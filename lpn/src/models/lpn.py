@@ -513,27 +513,70 @@ class LPN(nn.Module):
         return total_lp
 
     def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:
-        max_rows, max_cols = self.decoder.config.max_rows, self.decoder.config.max_cols
-        if max_rows <= 1:
+        max_rows_cfg, max_cols_cfg = self.decoder.config.max_rows, self.decoder.config.max_cols
+
+        if max_rows_cfg <= 1:
+            # Handles cases where no previous rows exist to copy from.
+            # Shape: (*batch_dims_of_grid_logits, 0, vocab_size)
             return jnp.zeros((*grid_logits.shape[:-2], 0, grid_logits.shape[-1]), dtype=grid_logits.dtype)
 
-        logits_list = []
-        num_cols_int = num_cols.astype(jnp.int32)
-        # Ensure num_cols_int is broadcastable for index calculation with grid_logits's batch dims
-        # Example: grid_logits (*B,N,S,V), num_cols_int needs to be (*B,N,1,1) effectively for indices
-        # If num_cols_int is (*B,N), expand it to (*B,N,1,1) for robust index shape for take_along_axis
-        # The `max_cols * i - (max_cols - num_cols.astype(jnp.int32))` from original code needs num_cols of proper rank.
-        # Let's use the original logic more directly, assuming num_cols is already shaped for broadcasting, or simple batching.
-        # The original `num_cols[..., None, None]` passed to this fn implies num_cols could be `(*B,N)`
-        # and becomes `(*B,N,1,1)`.
+        num_cols_int = num_cols.astype(jnp.int32) # Shape e.g. (*B, N, 1, 1)
+
+        # `i_values` represents the target row index (1-indexed) for which we are finding the EOL logit of the *previous* row.
+        # The loop was `for i in range(1, max_rows_cfg)`.
+        # These `i` values determine which previous row's end-of-line logit to pick.
+        # The logit picked at unrolled loop step `i` is for filling the start of row `i` (0-indexed: row `i`).
+        # So we need `max_rows_cfg - 1` such logits if `max_rows_cfg > 1`.
         
-        for i in range(1, max_rows):
-            # Original index logic from user's file
-            index = max_cols * i - (max_cols - num_cols_int) # num_cols_int is already (*B,N,1,1) or similar
-            safe_index = jnp.clip(index, 0, grid_logits.shape[-2] - 1)
-            logits_list.append(jnp.take_along_axis(grid_logits, safe_index, axis=-2))
-        return jnp.concatenate(logits_list, axis=-2)
-    
+        # i_values: (max_rows_cfg - 1), e.g., [1, 2, ..., max_rows_cfg-1]
+        # This `i` corresponds to the `i` in the original loop.
+        i_values = jnp.arange(1, max_rows_cfg) # Shape: (max_rows_cfg-1,)
+
+        # Expand i_values to be broadcastable with num_cols_int and grid_logits batch dims.
+        # num_cols_int: (*B, N, 1, 1) or similar. Let's assume grid_logits is (*B_dims, Seq, Vocab)
+        # and num_cols_int is (*B_dims, 1, 1) effectively for broadcasting.
+        # We want indices to be calculated for each item in B_dims and for each i_value.
+        # Target shape for `indices_to_gather`: (*B_dims, max_rows_cfg-1, 1)
+        
+        # Make i_values broadcastable: (1, ..., 1, max_rows_cfg-1, 1) to align with num_cols_int for broadcasting
+        # num_cols_int could be (*batch_dims, 1, 1) where *batch_dims matches grid_logits.
+        # i_values needs to be reshaped to allow broadcasting with num_cols_int.
+        # Example: num_cols_int (B,N,1,1), i_values (R-1,). Reshape i_values to (1,1,R-1,1) for broadcasting.
+        # Or, simpler: calculate indices assuming broadcasting works element-wise for i_values.
+        
+        # indices: shape will be `num_cols_int.shape` with an added dim for `i_values` if `i_values` is broadcast correctly.
+        # `index = max_cols_cfg * i - (max_cols_cfg - num_cols_int)`
+        # `i` is effectively (max_rows_cfg-1,). `num_cols_int` is (*B,N,1,1).
+        # After broadcasting i_values, `indices` will be (*B,N,max_rows_cfg-1,1)
+        indices = max_cols_cfg * i_values[..., None] - (max_cols_cfg - num_cols_int)
+        
+        # Clip indices
+        seq_len_of_grid_logits = grid_logits.shape[-2]
+        safe_indices = jnp.clip(indices, 0, seq_len_of_grid_logits - 1)
+        # safe_indices is now, e.g., (*B, N, max_rows_cfg-1, 1)
+
+        # grid_logits is (*B, N, Seq, Vocab)
+        # We want to gather `max_rows_cfg-1` logit vectors.
+        # `jnp.take_along_axis` will gather along axis -2 (Seq dim).
+        # Input `grid_logits`:    (...,      Seq,          Vocab)
+        # Input `safe_indices`:   (..., num_indices, 1)  (num_indices = max_rows_cfg-1)
+        # Output should be:       (..., num_indices, Vocab)
+        
+        # Ensure safe_indices has a final singleton dim if it's just for indexing, not slicing.
+        # The formula already makes it (*B,N,max_rows_cfg-1,1) so it's fine.
+        
+        gathered_logits = jnp.take_along_axis(grid_logits, safe_indices, axis=-2)
+        # gathered_logits should be (*B, N, max_rows_cfg-1, Vocab)
+        
+        # The original code concatenates these along axis=-2.
+        # This `gathered_logits` already has them effectively concatenated along the `max_rows_cfg-1` dimension.
+        # If the usage `grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)`
+        # expects `last_non_padded_logits` to have a flat sequence dimension that matches the number of
+        # elements being set (which is `max_rows_cfg - 1` if `max_cols::max_cols` selects that many start-of-row positions),
+        # then the shape `(*B, N, max_rows_cfg-1, Vocab)` is correct.
+        
+        return gathered_logits
+        
     def _get_random_search_context(
         self, latents_to_search_from, pairs_for_eval, grid_shapes_for_eval, key,
         num_samples: int, scale: float, scan_batch_size: Optional[int] = None,
