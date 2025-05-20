@@ -257,7 +257,9 @@ class LPN(nn.Module):
             example_latents = jax.random.normal(_key_for_latent_init, example_latents.shape)
 
         source_latents_for_gen_modes = example_latents
-        
+
+        print(f"1st generate output: Latents shape: {example_latents.shape}")
+
         if use_cross_attention:
             H = example_latents.shape[-1]
             sqrt_dh = jnp.sqrt(float(H))
@@ -268,9 +270,14 @@ class LPN(nn.Module):
             attended_context_gen = jnp.einsum('...qk,...kh->...qh', attn_weights, key_val_attn).squeeze(axis=-2)
             source_latents_for_gen_modes = attended_context_gen[..., None, :] 
         
+        print(f"2nd generate output, after crossatt: Latents shape: {source_latents_for_gen_modes.shape}")
+
         if mode == "mean":
             final_gen_context = source_latents_for_gen_modes.mean(axis=-2) 
             first_context, second_context = final_gen_context, final_gen_context
+
+            print(f"3rd generate output, after mean: Latents shape: {first_context.shape}")
+
         elif mode == "first":
             final_gen_context = source_latents_for_gen_modes[..., 0, :] 
             first_context, second_context = final_gen_context, final_gen_context
@@ -396,7 +403,7 @@ class LPN(nn.Module):
             latents: latents from which to start the search. Shape (*B, 1, H), (*B, N, H), or (*B, N+1, H).
         """
         if include_mean_latent:
-            print(f"Latents shape: {latents.shape}")
+            print(f"Preparing latents for search, Latents shape: {latents.shape}")
             mean_latent = latents
             if include_all_latents:
                 # Include the mean latent in the latents from which to start the search.
@@ -491,13 +498,6 @@ class LPN(nn.Module):
         num_cols_int = num_cols.astype(jnp.int32) 
         prev_row_indices_0_indexed = jnp.arange(0, max_rows_cfg - 1) 
 
-        # --- Start jax.debug.print block ---
-        # from jax.debug import print as jax_print # Make sure this is imported at module level
-        # jax_print("--- _get_last_non_padded_logits ---")
-        # jax_print("grid_logits shape: {}", grid_logits.shape)
-        # jax_print("num_cols_int shape: {}", num_cols_int.shape)
-        # jax_print("prev_row_indices_0_indexed shape: {}", prev_row_indices_0_indexed.shape)
-        # --- End jax.debug.print block ---
 
         def get_one_last_logit(prev_row_idx_scalar):
             index_to_gather = prev_row_idx_scalar * max_cols_cfg + (num_cols_int - 1)
@@ -786,79 +786,3 @@ class LPN(nn.Module):
 # Main block
 if __name__ == "__main__":
     from src.models.utils import TransformerLayerConfig 
-
-    batch_size = 4; mini_batch_size_N = 3; max_rows_val = 5; max_cols_val = 5
-    vocab_size_val = 10; hidden_size_H = 96 
-
-    encoder_config_test = EncoderTransformerConfig(
-        vocab_size=vocab_size_val, max_rows=max_rows_val, max_cols=max_cols_val,
-        transformer_layer=TransformerLayerConfig(dropout_rate=0.0, hidden_size=hidden_size_H, num_heads=4, mlp_size=128),
-        variational=True, output_size=hidden_size_H 
-    )
-    decoder_config_test = DecoderTransformerConfig(
-        vocab_size=vocab_size_val, max_rows=max_rows_val, max_cols=max_cols_val,
-        transformer_layer=TransformerLayerConfig(dropout_rate=0.0, hidden_size=hidden_size_H, num_heads=4, mlp_size=128),
-        hidden_size=hidden_size_H, 
-    )
-    encoder_test_module = EncoderTransformer(encoder_config_test)
-    decoder_test_module = DecoderTransformer(decoder_config_test)
-    lpn_test_model = LPN(encoder=encoder_test_module, decoder=decoder_test_module)
-    key_main = jax.random.PRNGKey(0)
-    key_pairs, key_shapes, key_init_master, key_dropout_master, key_gen_main = jax.random.split(key_main, 5)
-
-    test_pairs = jax.random.randint(key_pairs, (batch_size, mini_batch_size_N, max_rows_val, max_cols_val, 2), 0, vocab_size_val)
-    test_grid_shapes = jax.random.randint(key_shapes, (batch_size, mini_batch_size_N, 2, 2), 1, min(max_rows_val, max_cols_val) + 1)
-    
-    print("Initializing LPN model...")
-    init_rng_keys = ['params', 'latents', 'latents_init', 'random_search', 'gradient_ascent_random_perturbation', 'dropout']
-    init_rng_values = jax.random.split(key_init_master, len(init_rng_keys))
-    init_rngs = {name: val for name, val in zip(init_rng_keys, init_rng_values)}
-    
-    variables_lpn = lpn_test_model.init(
-        init_rngs, test_pairs, test_grid_shapes, 
-        dropout_eval=False, mode="mean", use_cross_attention=False, 
-        prior_kl_coeff=1e-4, pairwise_kl_coeff=1e-4
-    )
-    num_params = sum(p.size for p in jax.tree_util.tree_leaves(variables_lpn["params"]))
-    print(f"LPN Number of parameters: {num_params:,}")
-
-    apply_rng_keys = ['dropout', 'latents', 'latents_init', 'random_search', 'gradient_ascent_random_perturbation']
-    apply_rng_values = jax.random.split(key_dropout_master, len(apply_rng_keys))
-    apply_rngs = {name: val for name, val in zip(apply_rng_keys, apply_rng_values)}
-
-    print("\nTesting __call__ with use_cross_attention=True, mode='mean'")
-    loss_ca_mean, _ = lpn_test_model.apply(
-        variables_lpn, test_pairs, test_grid_shapes,
-        dropout_eval=False, mode="mean", use_cross_attention=True,
-        rngs=apply_rngs, prior_kl_coeff=1e-4, pairwise_kl_coeff=1e-4
-    )
-    print(f"CA Mean Loss: {loss_ca_mean}")
-
-    print("\nTesting generate_output with use_cross_attention=True, mode='first'")
-    gen_input_grid = test_pairs[:, 0, ..., 0] 
-    gen_input_grid_shape = test_grid_shapes[:, 0, 0, :] 
-
-    gen_out_grids, gen_out_shapes, _ = lpn_test_model.apply(
-        variables_lpn, method=lpn_test_model.generate_output, 
-        pairs=test_pairs, grid_shapes=test_grid_shapes, 
-        input=gen_input_grid, input_grid_shape=gen_input_grid_shape, 
-        key=key_gen_main, dropout_eval=True, mode="first", 
-        use_cross_attention=True, return_two_best=False,
-        rngs=apply_rngs 
-    )
-    print(f"Generated output grids shape (CA, first): {gen_out_grids.shape}")
-    print(f"Generated output shapes shape (CA, first): {gen_out_shapes.shape}")
-
-    @partial(jax.jit, static_argnames=["dropout_eval", "mode", "use_cross_attention"])
-    def apply_lpn_jitted(variables, p, gs, drp_eval, m, use_ca, rngs_dict, prior_c, pairwise_c):
-        return lpn_test_model.apply(variables, p, gs, dropout_eval=drp_eval, mode=m, use_cross_attention=use_ca,
-                                    rngs=rngs_dict, prior_kl_coeff=prior_c, pairwise_kl_coeff=pairwise_c)
-
-    print("\nOriginal Mean Loss (CA=False):") 
-    loss_orig_mean, _ = apply_lpn_jitted(
-        variables_lpn, test_pairs, test_grid_shapes,
-        drp_eval=False, m="mean", use_ca=False, 
-        rngs_dict=apply_rngs, prior_c=1e-4, pairwise_c=1e-4,
-    )
-    print(f"Original Mean Loss: {loss_orig_mean}")
-    print("--- End of __main__ example ---")
