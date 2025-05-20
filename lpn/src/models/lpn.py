@@ -20,44 +20,18 @@ class LPN(nn.Module):
     decoder: DecoderTransformer
 
     def __call__(
-        self,
-        pairs: chex.Array,
-        grid_shapes: chex.Array,
-        dropout_eval: bool,
-        mode: Literal["mean", "all", "random_search", "gradient_ascent", "cross_attention"],
-        prior_kl_coeff: Optional[float] = None,
-        pairwise_kl_coeff: Optional[float] = None,
-        **mode_kwargs,
+    self,
+    pairs: chex.Array,
+    grid_shapes: chex.Array,
+    dropout_eval: bool,
+    mode: Literal["mean", "all", "random_search", "gradient_ascent"],
+    prior_kl_coeff: Optional[float] = None,
+    pairwise_kl_coeff: Optional[float] = None,
+    use_cross_attention: bool = True, # Should be False
+    **mode_kwargs,
     ):
         """
         Forward pass of the LPN model.
-
-        Args:
-            pairs: input data as tokens. Shape (*B, N, R, C, 2).
-                - N: number of (input, output) pairs per progam.
-                - R: number of rows.
-                - C: number of columns.
-                - 2: two channels (input and output)
-            grid_shapes: shapes of the grids (e.g. 30x30). Shape (*B, N, 2, 2). The last two dimension
-                represents (rows, columns) of two channels, e.g. [[R_input, R_output], [C_input, C_output]].
-                Expects grid shapes values to be in [1, max_rows] and [1, max_cols].
-            dropout_eval: if false dropout is applied otherwise it is not.
-            mode: mode of the forward pass. Can be "mean" or "all".
-                - "mean": decodes the output using the mean latent of all the other pairs.
-                - "all": decodes the output N-1 times, each time using a different latent from the other
-                    pairs.
-                - "random_search": randomly search for a latent that best explains the (input, output) pairs
-                    and then decodes the output using that latent.
-                - "gradient_ascent": uses gradient ascent to find the latent that best explains the
-                    (input, output) pairs and then decodes the output using that latent
-            prior_kl_coeff: KL divergence coefficient for the variational inference. Required when using
-                variational inference.
-            pairwise_kl_coeff: KL divergence coefficient for the pairwise KL divergence. Optional.
-            mode_kwargs: additional keyword arguments for the inference mode (e.g. 'remove_encoder_latents').
-
-        Returns:
-            loss: loss value.
-            metrics: dictionary of metrics.
         """
         assert pairs.shape[-4] > 1, f"Number of pairs should be greater than 1, got {pairs.shape[-4]}."
         latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
@@ -74,15 +48,11 @@ class LPN(nn.Module):
         if mode_kwargs.get("remove_encoder_latents", False):
             key = self.make_rng("latents_init")
             latents = jax.random.normal(key, latents.shape)
-        leave_one_out_latents = make_leave_one_out(latents, axis=-2)  # (*B, N, N-1, H)
-        if mode == "mean":
-            # Compute the context vector by taking the mean of all but one latents.
-            context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
-            # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
-
-        elif mode == "cross_attention":
-            test_input = pairs[..., -1:, :, :, :] 
+        
+        print(f"using cross attention: {use_cross_attention}")
+        if use_cross_attention:
+            # Use cross attention to compute the context vector.
+            test_input = pairs[..., -1:, :, :, :]
             test_shape = grid_shapes[..., -1:, :, :] 
             support_latents = latents[..., :-1, :] 
 
@@ -92,50 +62,89 @@ class LPN(nn.Module):
             values = support_latents
             attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
             attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
-            context = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
-
-            context = jnp.tile(context[:, None, :], (1, pairs.shape[1], 1))  
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
-
-        elif mode == "all":
-            # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
-            loss, metrics = jax.vmap(
-                self._loss_from_pair_and_context, in_axes=(-2, None, None, None), out_axes=-1
-            )(leave_one_out_latents, pairs, grid_shapes, dropout_eval)
-            # For logging purposes
-            context = latents
-            distance_context_latents = norm(latents[..., None, :] - leave_one_out_latents, axis=-1)
-        elif mode == "random_search":
-            for arg in ["num_samples", "scale"]:
-                assert arg in mode_kwargs, f"'{arg}' argument required for 'random_search' training mode."
-            key = self.make_rng("random_search")
-            # Repeat all the pairs and grid shapes except the one to leave out.
-            leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
-            leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
-            # Get the best context for each pair using random search.
-            context, _ = self._get_random_search_context(
-                leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
-            )  # (*B, N, H)
-            # Compute the loss for each pair using the context from the random search. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
-        elif mode == "gradient_ascent":
-            for arg in ["num_steps", "lr"]:
-                assert arg in mode_kwargs, f"'{arg}' argument required for 'gradient_ascent' training mode."
-            if mode_kwargs.get("random_perturbation", None) is not None:
-                key = self.make_rng("gradient_ascent_random_perturbation")
+            latents = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
+            latents = jnp.tile(latents[:, None, :], (1, pairs.shape[1], 1))
+            leave_one_out_latents = make_leave_one_out(latents, axis=-2)
+            
+            if mode == "random_search":
+                for arg in ["num_samples", "scale"]:
+                    assert arg in mode_kwargs, f"'{arg}' argument required for 'random_search' training mode."
+                key = self.make_rng("random_search")
+                # Repeat all the pairs and grid shapes except the one to leave out.
+                leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
+                leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
+                # Get the best context for each pair using random search.
+                context, _ = self._get_random_search_context(
+                    leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
+                )  # (*B, N, H)
+                # Compute the loss for each pair using the context from the random search. Shape (*B, N).
+                loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            elif mode == "gradient_ascent":
+                for arg in ["num_steps", "lr"]:
+                    assert arg in mode_kwargs, f"'{arg}' argument required for 'gradient_ascent' training mode."
+                if mode_kwargs.get("random_perturbation", None) is not None:
+                    key = self.make_rng("gradient_ascent_random_perturbation")
+                else:
+                    key = None
+                # Repeat all the pairs and grid shapes except the one to leave out.
+                leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
+                leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
+                # Get the best context for each pair using gradient ascent.
+                context, _ = self._get_gradient_ascent_context(
+                    leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
+                )  # (*B, N, H)
+                # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
+                loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
             else:
-                key = None
-            # Repeat all the pairs and grid shapes except the one to leave out.
-            leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
-            leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
-            # Get the best context for each pair using gradient ascent.
-            context, _ = self._get_gradient_ascent_context(
-                leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
-            )  # (*B, N, H)
-            # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+                raise ValueError(f"Unsupported mode for cross-attention: {mode}")
         else:
-            raise ValueError(f"Unsupported mode: {mode}")
+            leave_one_out_latents = make_leave_one_out(latents, axis=-2)  # (*B, N, N-1, H) 
+            if mode == "mean":
+                # Compute the context vector by taking the mean of all but one latents.
+                context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
+                # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
+                loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            elif mode == "all":
+                # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
+                loss, metrics = jax.vmap(
+                    self._loss_from_pair_and_context, in_axes=(-2, None, None, None), out_axes=-1
+                )(leave_one_out_latents, pairs, grid_shapes, dropout_eval)
+                # For logging purposes
+                context = latents
+                distance_context_latents = norm(latents[..., None, :] - leave_one_out_latents, axis=-1)
+            elif mode == "random_search":
+                for arg in ["num_samples", "scale"]:
+                    assert arg in mode_kwargs, f"'{arg}' argument required for 'random_search' training mode."
+                key = self.make_rng("random_search")
+                # Repeat all the pairs and grid shapes except the one to leave out.
+                leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
+                leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
+                # Get the best context for each pair using random search.
+                context, _ = self._get_random_search_context(
+                    leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
+                )  # (*B, N, H)
+                # Compute the loss for each pair using the context from the random search. Shape (*B, N).
+                loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            elif mode == "gradient_ascent":
+                for arg in ["num_steps", "lr"]:
+                    assert arg in mode_kwargs, f"'{arg}' argument required for 'gradient_ascent' training mode."
+                if mode_kwargs.get("random_perturbation", None) is not None:
+                    key = self.make_rng("gradient_ascent_random_perturbation")
+                else:
+                    key = None
+                # Repeat all the pairs and grid shapes except the one to leave out.
+                leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
+                leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
+                # Get the best context for each pair using gradient ascent.
+                context, _ = self._get_gradient_ascent_context(
+                    leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
+                )  # (*B, N, H)
+                # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
+                loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+            else:
+                raise ValueError(f"Unsupported mode: {mode}")
+        
+        # Common code for both branches
         leave_one_out_contexts = make_leave_one_out(context, axis=-2)
         cosine_between_contexts = jnp.einsum("...h,...nh->...n", context, leave_one_out_contexts) / (
             norm(context, axis=-1)[..., None] * norm(leave_one_out_contexts, axis=-1) + 1e-5
@@ -308,7 +317,7 @@ class LPN(nn.Module):
         input_grid_shape: chex.Array,
         key: Optional[chex.PRNGKey],
         dropout_eval: bool,
-        mode: Literal["mean", "first", "random_search", "gradient_ascent", "cross_attention"],
+        mode: Literal["mean", "first", "random_search", "gradient_ascent"],
         *,
         return_two_best: bool = False,
         **mode_kwargs,

@@ -64,6 +64,7 @@ class Trainer:
         self.prior_kl_coeff = cfg.training.get("prior_kl_coeff")
         self.pairwise_kl_coeff = cfg.training.get("pairwise_kl_coeff")
         self.train_inference_mode = cfg.training.inference_mode
+        self.use_cross_attention = cfg.training.get("use_cross_attention", True)
         self.train_inference_kwargs = cfg.training.get("inference_kwargs") or {}
 
         def train_one_step_accumulate(state, batch, key):
@@ -344,6 +345,7 @@ class Trainer:
             dropout_eval=False,
             prior_kl_coeff=self.prior_kl_coeff,
             pairwise_kl_coeff=self.pairwise_kl_coeff,
+            use_cross_attention=self.use_cross_attention,
             mode=self.train_inference_mode,
             rngs=key,
             **self.train_inference_kwargs,
