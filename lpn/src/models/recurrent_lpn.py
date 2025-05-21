@@ -636,7 +636,61 @@ class LPN(nn.Module):
         final_output_shapes = current_shape
         return final_output_grids, final_output_shapes, intermediate_outputs if save_intermediate else None
 
+    @classmethod
+    def _prepare_latents_before_search(
+        cls,
+        include_mean_latent: bool,
+        include_all_latents: bool,
+        latents: chex.Array,
+        random_perturbation: Optional[dict] = None,
+        key: Optional[chex.PRNGKey] = None,
+    ) -> chex.Array:
+        """
+        Selects the latents from which to start the search. If include_mean_latent is True, the mean latent
+        is included in the latents from which to start the search. If include_all_latents is True, all the pair
+        latents are included in the latents from which to start the search. If both are True, the mean latent
+        is concatenated to the latents from which to start the search. If both are False, an error is raised.
 
+        Args:
+            include_mean_latent: if true, includes the mean latent in the latents from which to start the search.
+            include_all_latents: if true, includes all the pair latents in the latents from which to start the
+                search.
+            latents: latents from the encoder. Shape (*B, N, H).
+            random_perturbation: dictionary of random perturbation arguments. If not None, the following
+                arguments are required:
+                - num_samples: number of random samples to generate around the mean latent.
+                - scale: Gaussian scale of the random perturbations.
+            key: random key to generate the random perturbation. Shape (2,).
+
+        Returns:
+            latents: latents from which to start the search. Shape (*B, 1, H), (*B, N, H), or (*B, N+1, H).
+        """
+        if include_mean_latent:
+            mean_latent = latents.mean(axis=-2, keepdims=True)
+            if include_all_latents:
+                # Include the mean latent in the latents from which to start the search.
+                prep_latents = jnp.concatenate([mean_latent, latents], axis=-2)
+            else:
+                # Only start the search from the mean latent.
+                prep_latents = mean_latent
+        else:
+            # Start the search from all the pair latents.
+            if not include_all_latents:
+                raise ValueError(
+                    "At least one of 'include_mean_latent' or 'include_all_latents' should be True."
+                )
+            prep_latents = latents
+        if random_perturbation is not None:
+            assert key is not None, "'key' argument required for random perturbation."
+            for arg in ["num_samples", "scale"]:
+                assert arg in random_perturbation, f"'{arg}' argument required for random perturbation."
+            num_samples = random_perturbation["num_samples"]
+            scale = random_perturbation["scale"]
+            random_vectors = jax.random.normal(key, (*latents.shape[:-2], num_samples, latents.shape[-1]))
+            random_latents = latents.mean(axis=-2, keepdims=True) + scale * random_vectors
+            prep_latents = jnp.concatenate([prep_latents, random_latents], axis=-2)
+        return prep_latents
+        
     def _get_recurrent_ga_context(
         self,
         latents: chex.Array,
