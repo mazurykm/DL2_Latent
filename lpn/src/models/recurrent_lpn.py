@@ -281,19 +281,15 @@ class LPN(nn.Module):
             
             if t < matrix_size_cols - 1:
        
-                _, _, grid_logits, _ = self._generate_logits_from_context(
-                    context_col, current_input, current_input, dropout_eval
-                )
+                _, _, grid_logits = self.decoder(current_input, current_input, context_col, dropout_eval)
                 
                 predicted_tokens = jnp.argmax(grid_logits, axis=-1)
                 #prev version
                 current_input = jnp.concatenate([grid_shapes[..., 0], predicted_tokens], axis=-1)
 
             else:
+                row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
 
-                row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
-                    context_col, current_input, output_seq, dropout_eval
-                )
                 final_row_logits = row_logits
                 final_col_logits = col_logits
                 final_grid_logits = grid_logits
@@ -486,39 +482,6 @@ class LPN(nn.Module):
 
             )
             return output_grids, output_shapes, info, intermediate_dict
-
-    def _generate_logits_from_context(
-        self,
-        context: chex.Array,
-        input_seq: chex.Array,
-        true_output_seq: chex.Array,
-        dropout_eval: bool,
-    ) -> tuple[chex.Array, chex.Array, chex.Array, chex.Array]:
-        """
-        Decodes using teacher forcing: uses true output_seq.
-
-        Args:
-            context: context vector for current column, shape (B, H)
-            input_seq: current input sequence, shape (B, 2 + R*C)
-            true_output_seq: true output sequence, shape (B, 2 + R*C)
-            dropout_eval: if false dropout is applied otherwise it is not
-
-        Returns:
-            row_logits: logits for rows
-            col_logits: logits for cols
-            grid_logits: logits for grids
-            updated_input_seq: new input_seq to feed into next recurrent step
-        """
-        # Just feed the true output_seq
-        row_logits, col_logits, grid_logits = self.decoder(input_seq, true_output_seq, context, dropout_eval)
-
-        # The output shape (still can use for metrics or checking)
-        output_shape = true_output_seq[..., :2]  # (B, 2)
-
-        # New updated input for next step: we use true_output_seq
-        updated_input_seq = true_output_seq
-
-        return row_logits, col_logits, grid_logits, updated_input_seq
 
     def _generate_output_from_context_v2(
         self,
@@ -761,14 +724,17 @@ class LPN(nn.Module):
                 
                 if t < matrix_size_cols - 1:
         
-                    _, _, grid_logits, _ = self._generate_logits_from_context(
-                        context_col, current_input, current_input, dropout_eval=True
-                    )
+                    _, _, grid_logits = decoder(current_input, current_input, context_col, dropout_eval=True)
+
+                    output_shape = true_output_seq[..., :2]  # (B, 2)
+                    updated_input_seq = true_output_seq
+
                     print(f"_gradient_ascent_context, log_prob_fn: grid_logits.shape: {grid_logits.shape}")
                     predicted_tokens = jnp.argmax(grid_logits, axis=-1)
                     print(f"_gradient_ascent_context, log_prob_fn: predicted_tokens.shape: {predicted_tokens.shape}")
                     
                     print(f"_gradient_ascent_context, log_prob_fn: input_seq.shape: {input_seq.shape}")
+                    print(f"_gradient_ascent_context, log_prob_fn: input_seq[..., 0:2].shape: {input_seq[..., 0:2].shape}")
                     current_input = jnp.concatenate([input_seq[..., 0:2], predicted_tokens], axis=-1)
         
                 else:
