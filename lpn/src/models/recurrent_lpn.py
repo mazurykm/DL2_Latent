@@ -463,27 +463,12 @@ class LPN(nn.Module):
         elif mode == "first":
             context = latents[..., 0, :]
             first_context, second_context = context, context
-        elif mode == "random_search":
-            assert key is not None, "'key' argument required for 'random_search' inference mode."
-            for arg in ["num_samples", "scale"]:
-                assert arg in mode_kwargs, f"'{arg}' argument required for 'random_search' inference mode."
-
-            first_context, second_context = self._get_random_search_context(
-                latents, pairs, grid_shapes, key, **mode_kwargs
-            )
-        elif mode == "gradient_ascent":
-            for arg in ["num_steps", "lr"]:
-                assert arg in mode_kwargs, f"'{arg}' argument required for 'gradient_ascent' inference mode."
-
-            first_context, second_context = self._get_gradient_ascent_context(
-                latents, pairs, grid_shapes, key, **mode_kwargs
-            )
+        
         elif mode == "recurrent_ga":
             first_context, second_context = self._get_recurrent_ga_context(
             latents, pairs, grid_shapes, key,
             matrix_size_rows=matrix_size_rows,
             matrix_size_cols=matrix_size_cols,
-            dropout_eval=dropout_eval,
             **mode_kwargs
             )
             if second_context is None:
@@ -651,7 +636,7 @@ class LPN(nn.Module):
         final_output_shapes = current_shape
         return final_output_grids, final_output_shapes, intermediate_outputs if save_intermediate else None
 
-    
+
     def _get_recurrent_ga_context(
         self,
         latents: chex.Array,
@@ -662,74 +647,227 @@ class LPN(nn.Module):
         lr: float,
         matrix_size_rows: int,
         matrix_size_cols: int,
+        lr_schedule: bool = False,
+        lr_schedule_exponent: float = 0.5,
+        accumulate_gradients_decoder_pairs: bool = False,
+        scan_gradients_latents: bool = False,
+        optimizer: Literal["sgd", "adam"] = "sgd",
         optimizer_kwargs: Optional[dict] = None,
-        dropout_eval: bool = True,
+        include_mean_latent: bool = True,
+        include_all_latents: bool = False,
+        random_perturbation: Optional[dict] = None,
+        stop_gradient_latent_move: bool = True,
         **kwargs,
     ) -> tuple[chex.Array, chex.Array]:
-       
-        latents = latents.mean(axis=-2, keepdims=True)
-                
-        input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
+        """Returns the best two contexts using a gradient ascent algorithm.
 
+        Args:
+            latents: latents from the encoder. Shape (*B, N, H).
+            pairs: input data as tokens. Shape (*B, N, R, C, 2).
+            grid_shapes: shapes of the grids (e.g. 30x30). Shape (*B, N, 2, 2). Expects grid shapes values
+                to be in [1, max_rows] and [1, max_cols].
+            num_steps: number of gradient ascent steps.
+            lr: learning rate for the gradient ascent.
+            lr_schedule: if true, uses a cosine learning rate schedule, default to false.
+            lr_schedule_exponent: exponent for the cosine learning rate schedule, default to 0.5.
+            accumulate_gradients_decoder_pairs: if true, accumulates the gradients over the pairs, default to
+                false.
+            scan_gradients_latents: if true, scans the gradients over the latents, otherwise, use vmap,
+                default to false.
+            optimizer: optimizer to use for the gradient ascent. Can be "sgd" or "adam", default to "sgd".
+            optimizer_kwargs: additional keyword arguments for the optimizer (e.g. b1, b2, eps for adam).
+            include_mean_latent: if true (default to true), includes the mean latent in the latents from which
+                to start the gradient ascent.
+            include_all_latents: if true (default to false), includes all the pair latents in the latents from
+                which to start the gradient ascent.
+            random_perturbation: dictionary of random perturbation arguments. If not None, the following
+                arguments are required:
+                - num_samples: number of random samples to generate around the mean latent.
+                - scale: Gaussian scale of the random perturbations.
+            stop_gradient_latent_move: if true (default to true), do not propagate the loss gradient through
+                the latent modification from the gradient ascent.
 
-        def compute_avg_loss(latents, output_seq):
-            latents = latents[..., None, :].repeat(output_seq.shape[-2], axis=-2)
-
-            total_loss = 0.0
-            #for i in range(pairs.shape[1]):
-                #print(f"        - computing loss for pair {i}", flush=True)
-            loss, _ = self._loss_from_pair_and_context(
-                    context=latents, 
-                    pairs=pairs,
-                    grid_shapes=grid_shapes,
-                    dropout_eval=dropout_eval,
-                    matrix_size_rows=matrix_size_rows,
-                    matrix_size_cols=matrix_size_cols,
-            )
-            total_loss += loss
-            avg_loss = jnp.mean(total_loss)
-            #print(f"    > compute_avg_loss returning {avg_loss}", flush=True)
-            return avg_loss
-            
-        optimizer = optax.adam(lr, **(optimizer_kwargs or {}))
-        opt_state = optimizer.init(latents)
-        
-        grad_fn = jax.vmap(jax.value_and_grad(compute_avg_loss), in_axes=(-2, None, None, None), out_axes=(-1, -2)
+        Returns:
+            best_context: best context. Shape (*B, H).
+            second_best_context: second best context. Shape (*B, H).
+        """
+        latents = self._prepare_latents_before_search(
+            include_mean_latent, include_all_latents, latents, random_perturbation, key
         )
 
+        # Flatten input/output for decoding likelihood
+        input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
+
+        def log_probs_fn(
+            latents: chex.Array, input_seq: chex.Array, output_seq: chex.Array, decoder: DecoderTransformer
+        ) -> chex.Array:
+            # Use the same latent for all pairs of the same task.
+            latents = latents[..., None, :].repeat(output_seq.shape[-2], axis=-2)
+            print(f"_gradient_ascent_context, log_prob_fn: latents.shape: {latents.shape}")
+
+            context_matrix = self._convert_to_matrix(
+            matrix_size_rows=matrix_size_rows,
+            matrix_size_cols=matrix_size_cols,
+            latents=latents,
+            )
+            print(f"_gradient_ascent_context, log_prob_fn: context_matrix.shape: {context_matrix.shape}")
+
+            current_input = input_seq
+
+            for t in range(matrix_size_cols):
+
+                context_col = context_matrix[..., t]
+                
+                if t < matrix_size_cols - 1:
+        
+                    _, _, grid_logits, _ = self._generate_logits_from_context(
+                        context_col, current_input, current_input, dropout_eval
+                    )
+                    print(f"_gradient_ascent_context, log_prob_fn: grid_logits.shape: {grid_logits.shape}")
+                    predicted_tokens = jnp.argmax(grid_logits, axis=-1)
+                    current_input = jnp.concatenate([grid_shapes[..., 0], predicted_tokens], axis=-1)
+        
+                else:
+                    row_logits, col_logits, grid_logits = decoder(input_seq, output_seq, context_col, dropout_eval=True)
+
+            log_probs = self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq)
+            return log_probs
+
+        value_and_grad_log_probs_fn = jax.vmap(
+            jax.value_and_grad(log_probs_fn), in_axes=(-2, None, None, None), out_axes=(-1, -2)
+        )
         # Add vmaps for batch dimensions
         for batch_dim in range(input_seq[..., 0, 0].ndim):
-            grad_fn = jax.vmap(grad_fn, in_axes=(0, 0, 0, None))
+            value_and_grad_log_probs_fn = jax.vmap(value_and_grad_log_probs_fn, in_axes=(0, 0, 0, None))
 
-        #vmap_log_probs_fn = jax.vmap(compute_avg_loss, in_axes=(-2, None, None, None), out_axes=-1)
+        vmap_log_probs_fn = jax.vmap(log_probs_fn, in_axes=(-2, None, None, None), out_axes=-1)
 
+        if accumulate_gradients_decoder_pairs:
 
+            def wrap_value_and_grad(value_and_grad_log_probs):
+                def wrapped(latents, input_seq, output_seq, decoder):
+                    def body_fn(decoder, carry, seqs):
+                        log_probs, grads = carry
+                        log_probs_i, grads_i = value_and_grad_log_probs(
+                            latents, seqs[0][..., None, :], seqs[1][..., None, :], decoder
+                        )
+                        return (log_probs + log_probs_i, grads + grads_i), None
 
-        for col_idx in range(matrix_size_cols):
-            for step in range(num_steps):
-                #print(f"    >> Step {step} for column {col_idx}", flush=True)
-                loss_val, grads = grad_fn(latents, output_seq)
+                    init_carry = (jnp.zeros_like(latents[..., 0]), jnp.zeros_like(latents))
+                    (log_probs, grads), _ = nn.scan(
+                        body_fn,
+                        variable_broadcast="params",
+                        split_rngs={"params": False},
+                        in_axes=-2,
+                    )(decoder, init_carry, (input_seq, output_seq))
 
-                latent_matrix = self._convert_to_matrix(
-                    matrix_size_rows=matrix_size_rows,
-                    matrix_size_cols=matrix_size_cols,
-                    latents=latents,
-                )
+                    return log_probs, grads
 
-                mask = jnp.arange(matrix_size_cols) == col_idx
-                mask = mask.astype(latent_matrix.dtype)
-                mask = mask.reshape((1,) * (latent_matrix.ndim - 1) + (-1,))
-                grads = grads * mask 
+                return wrapped
 
-                updates, opt_state = optimizer.update(grads, opt_state)
-                latent_matrix = optax.apply_updates(latent_matrix, updates)
+            def wrap_log_prob(log_probs_fn):
+                def wrapped(latents, input_seq, output_seq, decoder):
+                    log_probs, _ = nn.scan(
+                        lambda decoder, log_prob, seqs: (
+                            log_prob
+                            + log_probs_fn(latents, seqs[0][..., None, :], seqs[1][..., None, :], decoder),
+                            None,
+                        ),
+                        variable_broadcast="params",
+                        split_rngs={"params": False},
+                        in_axes=-2,
+                    )(decoder, jnp.zeros_like(latents[..., 0]), (input_seq, output_seq))
+                    return log_probs
 
-                latents = latent_matrix.reshape(batch_size, -1)
+                return wrapped
 
-        optimized_context = latent_matrix.reshape(batch_size, -1)
+            value_and_grad_log_probs_fn = wrap_value_and_grad(value_and_grad_log_probs_fn)
+            vmap_log_probs_fn = wrap_log_prob(vmap_log_probs_fn)
 
-        return optimized_context, None
+        if scan_gradients_latents:
 
+            def wrap_value_and_grad(value_and_grad_log_probs):
+                def wrapped(latents, input_seq, output_seq, decoder):
+                    _, (log_probs, grads) = nn.scan(
+                        lambda decoder, _, latent: (
+                            _,
+                            value_and_grad_log_probs(latent[..., None, :], input_seq, output_seq, decoder),
+                        ),
+                        variable_broadcast="params",
+                        split_rngs={"params": False},
+                        in_axes=-2,
+                        out_axes=(-1, -2),
+                    )(decoder, None, latents)
+                    return jnp.squeeze(log_probs, axis=-2), jnp.squeeze(grads, axis=-3)
+
+                return wrapped
+
+            def wrap_log_prob(log_probs_fn):
+                def wrapped(latents, input_seq, output_seq, decoder):
+                    _, log_probs = nn.scan(
+                        lambda decoder, _, latent: (
+                            _,
+                            log_probs_fn(latent[..., None, :], input_seq, output_seq, decoder),
+                        ),
+                        variable_broadcast="params",
+                        split_rngs={"params": False},
+                        in_axes=-2,
+                        out_axes=-1,
+                    )(decoder, None, latents)
+                    return jnp.squeeze(log_probs, axis=-2)
+
+                return wrapped
+
+            value_and_grad_log_probs_fn = wrap_value_and_grad(value_and_grad_log_probs_fn)
+            vmap_log_probs_fn = wrap_log_prob(vmap_log_probs_fn)
+
+        if lr_schedule:
+            lr = optax.cosine_decay_schedule(lr, num_steps, exponent=lr_schedule_exponent)
+        if optimizer == "sgd":
+            optimizer: optax.GradientTransformation = optax.chain(
+                optax.clip_by_global_norm(1.0), optax.sgd(learning_rate=lr, **(optimizer_kwargs or {}))
+            )
+        elif optimizer == "adam":
+            optimizer: optax.GradientTransformation = optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adam(learning_rate=lr, eps_root=1e-8, **(optimizer_kwargs or {})),
+            )
+        else:
+            raise ValueError(f"Unsupported optimizer: {optimizer}")
+        opt_state = optimizer.init(latents)
+
+        def update_latents(decoder, carry, _):
+            latents, opt_state = carry
+            log_probs, grads = value_and_grad_log_probs_fn(latents, input_seq, output_seq, decoder)
+            assert grads.shape == latents.shape
+            if stop_gradient_latent_move:
+                grads = jax.lax.stop_gradient(grads)
+            updates, opt_state = optimizer.update(-grads, opt_state)
+            latents += updates
+            return (latents, opt_state), (latents, log_probs)
+
+        (last_latents, _), (all_latents, all_log_probs) = nn.scan(
+            update_latents,
+            variable_broadcast="params",
+            split_rngs={"params": False},
+            length=num_steps,
+            out_axes=(-2, -1),
+        )(self.decoder, (latents, opt_state), None)
+
+        # Concatenate original latents to all_latents and flatten all the latents.
+        latents = jnp.concatenate([latents[..., None, :], all_latents], axis=-2).reshape(
+            *latents.shape[:-2], -1, latents.shape[-1]
+        )
+        # Get all log_probs
+        last_log_probs = vmap_log_probs_fn(last_latents, input_seq, output_seq, self.decoder)
+
+        log_probs = jnp.concatenate([all_log_probs, last_log_probs[..., None]], axis=-1).reshape(
+            *last_log_probs.shape[:-1], -1
+        )
+
+        best_context, second_best_context = self._select_best_and_second_best_latents(log_probs, latents)
+
+        return best_context, second_best_context
 
     @classmethod
     def _flatten_input_output_for_decoding(
