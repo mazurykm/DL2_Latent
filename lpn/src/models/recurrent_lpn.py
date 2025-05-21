@@ -690,7 +690,7 @@ class LPN(nn.Module):
             random_latents = latents.mean(axis=-2, keepdims=True) + scale * random_vectors
             prep_latents = jnp.concatenate([prep_latents, random_latents], axis=-2)
         return prep_latents
-        
+
     def _get_recurrent_ga_context(
         self,
         latents: chex.Array,
@@ -775,7 +775,7 @@ class LPN(nn.Module):
                 if t < matrix_size_cols - 1:
         
                     _, _, grid_logits, _ = self._generate_logits_from_context(
-                        context_col, current_input, current_input, dropout_eval
+                        context_col, current_input, current_input, dropout_eval=True
                     )
                     print(f"_gradient_ascent_context, log_prob_fn: grid_logits.shape: {grid_logits.shape}")
                     predicted_tokens = jnp.argmax(grid_logits, axis=-1)
