@@ -281,13 +281,6 @@ class LPN(nn.Module):
             
             if t < matrix_size_cols - 1:
        
-                # row_logits, col_logits, grid_logits, _ = self._generate_logits_from_context(
-                #     context_col, current_input, current_input, dropout_eval
-                # )
-                # predicted_rows = jnp.argmax(row_logits, axis=-1) + 1
-                # predicted_cols = jnp.argmax(col_logits, axis=-1) + 1
-                # predicted_tokens = jnp.argmax(grid_logits, axis=-1)
-                # current_input = jnp.concatenate([predicted_rows[..., None], predicted_cols[..., None], predicted_tokens], axis=-1)
                 _, _, grid_logits, _ = self._generate_logits_from_context(
                     context_col, current_input, current_input, dropout_eval
                 )
@@ -295,13 +288,6 @@ class LPN(nn.Module):
                 predicted_tokens = jnp.argmax(grid_logits, axis=-1)
                 #prev version
                 current_input = jnp.concatenate([grid_shapes[..., 0], predicted_tokens], axis=-1)
-
-                # #current version, adding the predicted tokens to the current input
-                # current_input = current_input.at[..., 2].add(predicted_tokens)
-                # # Clip to valid token range
-                # vocab_size = self.decoder.config.vocab_size
-                # updated_tokens = jnp.clip(current_input[..., 2], a_min=0, a_max=vocab_size - 1)
-                # current_input = current_input.at[..., 2].set(updated_tokens)
 
             else:
 
@@ -757,6 +743,8 @@ class LPN(nn.Module):
         ) -> chex.Array:
             # Use the same latent for all pairs of the same task.
             latents = latents[..., None, :].repeat(output_seq.shape[-2], axis=-2)
+            grid_shapes_s = grid_shapes[..., None, :].repeat(output_seq.shape[-2], axis=-2)
+
             print(f"_gradient_ascent_context, log_prob_fn: latents.shape: {latents.shape}")
 
             context_matrix = self._convert_to_matrix(
@@ -779,7 +767,10 @@ class LPN(nn.Module):
                     )
                     print(f"_gradient_ascent_context, log_prob_fn: grid_logits.shape: {grid_logits.shape}")
                     predicted_tokens = jnp.argmax(grid_logits, axis=-1)
-                    current_input = jnp.concatenate([grid_shapes[..., 0], predicted_tokens], axis=-1)
+                    print(f"_gradient_ascent_context, log_prob_fn: predicted_tokens.shape: {predicted_tokens.shape}")
+                    print(f"_gradient_ascent_context, log_prob_fn: grid_shapes_s.shape: {grid_shapes_s.shape}")
+                    print(f"_gradient_ascent_context, log_prob_fn: grid_shapes.shape: {grid_shapes.shape}")
+                    current_input = jnp.concatenate([grid_shapes_s[..., 0], predicted_tokens], axis=-1)
         
                 else:
                     row_logits, col_logits, grid_logits = decoder(input_seq, output_seq, context_col, dropout_eval=True)
