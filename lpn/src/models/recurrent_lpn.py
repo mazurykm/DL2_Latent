@@ -726,9 +726,6 @@ class LPN(nn.Module):
         
                     _, _, grid_logits = decoder(current_input, current_input, context_col, dropout_eval=True)
 
-                    output_shape = true_output_seq[..., :2]  # (B, 2)
-                    updated_input_seq = true_output_seq
-
                     print(f"_gradient_ascent_context, log_prob_fn: grid_logits.shape: {grid_logits.shape}")
                     predicted_tokens = jnp.argmax(grid_logits, axis=-1)
                     print(f"_gradient_ascent_context, log_prob_fn: predicted_tokens.shape: {predicted_tokens.shape}")
