@@ -30,6 +30,8 @@ class LPN(nn.Module):
         matrix_size_rows: jnp.int32, #new
         matrix_size_cols: jnp.int32, #new
         mode: Literal["mean", "all", "random_search", "gradient_ascent", "matrix"],
+        current_step: Optional[int] = None,
+        gumbel_temperature_schedule_params: Optional[dict] = None,
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
         **mode_kwargs,
@@ -66,6 +68,15 @@ class LPN(nn.Module):
         """
         assert pairs.shape[-4] > 1, f"Number of pairs should be greater than 1, got {pairs.shape[-4]}."
         latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
+        
+        key_gumbel = self.make_rng("gumbel")
+
+        temperature = 0.5 # Default if no schedule
+        if gumbel_temperature_schedule_params is not None:
+            temp = gumbel_temperature_schedule_params["initial_temp"] * \
+                (gumbel_temperature_schedule_params["decay_rate"] ** current_step)
+            temperature = jnp.maximum(gumbel_temperature_schedule_params["final_temp"], temp)
+        
 
         if latents_logvar is not None:
             key = self.make_rng("latents")
@@ -84,12 +95,14 @@ class LPN(nn.Module):
             # Compute the context vector by taking the mean of all but one latents.
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, 
+            matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows, key_gumbel=key, temperature=temperature)
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # Compute loss and metrics
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval,
+             matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows, key_gumbel=key, temperature=temperature)
 
         elif mode == "cross_attention":
 
@@ -98,7 +111,8 @@ class LPN(nn.Module):
                 matrix_size_rows=matrix_size_rows, 
                 matrix_size_cols=matrix_size_cols
             )
-            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval,
+             matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows, key_gumbel=key, temperature=temperature)
         
         elif mode == "recurrent_ga":
             for arg in ["num_steps", "lr"]:
@@ -114,12 +128,15 @@ class LPN(nn.Module):
                 leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key,
                 matrix_size_rows=matrix_size_rows,
                 matrix_size_cols=matrix_size_cols,
+                key_gumbel = key_gumbel,
                 **mode_kwargs
             )
             loss, metrics = self._loss_from_pair_and_context(
                 context, pairs, grid_shapes, dropout_eval,
                 matrix_size_rows=matrix_size_rows,
                 matrix_size_cols=matrix_size_cols,
+                key_gumbel=key,
+                temperature=temperature,
             )
 
         else:
@@ -240,6 +257,8 @@ class LPN(nn.Module):
         dropout_eval: bool,
         matrix_size_rows: int = 64,
         matrix_size_cols: int = 1,
+        key_gumbel: Optional[chex.PRNGKey] = None,
+        temperature: float = 0.5,
     ):
         """
         Computes the loss for a single pair given a context.
@@ -256,7 +275,7 @@ class LPN(nn.Module):
             metrics: dictionary of metrics of shape (*B,).
         """
         config = self.decoder.config
-
+        #print(f"calling _loss_from_pair_and_context, temperature: {temperature}")
         # Make the input and output sequences.
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
@@ -283,10 +302,16 @@ class LPN(nn.Module):
        
                 _, _, grid_logits = self.decoder(current_input, current_input, context_col, dropout_eval)
                 
-                predicted_tokens = jnp.argmax(grid_logits, axis=-1)
-                #prev version
-                current_input = jnp.concatenate([grid_shapes[..., 0], predicted_tokens], axis=-1)
 
+                # Add Gumbel noise
+                gumbel_noise = -jnp.log(-jnp.log(jax.random.uniform(key_gumbel, grid_logits.shape) + 1e-9) + 1e-9)
+                y = jax.nn.softmax((grid_logits + gumbel_noise) / temperature, axis=-1)
+
+                # Straight-through: soft in backward, hard in forward
+                y_hard = jax.lax.stop_gradient(jax.nn.one_hot(jnp.argmax(y, axis=-1), y.shape[-1]) - y) + y
+
+                current_input = jnp.concatenate([grid_shapes[..., 0], jnp.argmax(y_hard, axis=-1)], axis=-1)
+            
             else:
                 row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
 
@@ -419,6 +444,8 @@ class LPN(nn.Module):
         """
         latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
 
+        key, key_gumbel = jax.random.split(key)
+
         if latents_logvar is not None:
             assert key is not None, "'key' argument required for variational inference."
             key, key_latents = jax.random.split(key)
@@ -447,11 +474,12 @@ class LPN(nn.Module):
             first_context, second_context = context, context
         
         elif mode == "recurrent_ga":
-            print(f"evaluate recurrent_ga")
+            #print(f"evaluate recurrent_ga")
             first_context, second_context = self._get_recurrent_ga_context(
             latents, pairs, grid_shapes, key,
             matrix_size_rows=matrix_size_rows,
             matrix_size_cols=matrix_size_cols,
+            key_gumbel=key_gumbel,
             **mode_kwargs
             )
             if second_context is None:
@@ -641,6 +669,7 @@ class LPN(nn.Module):
             prep_latents = jnp.concatenate([prep_latents, random_latents], axis=-2)
         return prep_latents
 
+
     def _get_recurrent_ga_context(
         self,
         latents: chex.Array,
@@ -661,6 +690,7 @@ class LPN(nn.Module):
         include_all_latents: bool = False,
         random_perturbation: Optional[dict] = None,
         stop_gradient_latent_move: bool = True,
+        key_gumbel: Optional[chex.PRNGKey] = None,
         **kwargs,
     ) -> tuple[chex.Array, chex.Array]:
         """Returns the best two contexts using a gradient ascent algorithm.
@@ -690,6 +720,8 @@ class LPN(nn.Module):
                 - scale: Gaussian scale of the random perturbations.
             stop_gradient_latent_move: if true (default to true), do not propagate the loss gradient through
                 the latent modification from the gradient ascent.
+            matrix_size_rows: number of rows in the context matrix.
+            matrix_size_cols: number of columns in the context matrix.
 
         Returns:
             best_context: best context. Shape (*B, H).
@@ -708,7 +740,7 @@ class LPN(nn.Module):
             # Use the same latent for all pairs of the same task.
             latents = latents[..., None, :].repeat(output_seq.shape[-2], axis=-2)
 
-            print(f"_gradient_ascent_context, log_prob_fn: latents.shape: {latents.shape}")
+            #print(f"_gradient_ascent_context, log_prob_fn: latents.shape: {latents.shape}")
 
             context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
@@ -727,13 +759,17 @@ class LPN(nn.Module):
         
                     _, _, grid_logits = decoder(current_input, current_input, context_col, dropout_eval=True)
 
-                    #print(f"_gradient_ascent_context, log_prob_fn: grid_logits.shape: {grid_logits.shape}")
-                    predicted_tokens = jnp.argmax(grid_logits, axis=-1)
-                    #print(f"_gradient_ascent_context, log_prob_fn: predicted_tokens.shape: {predicted_tokens.shape}")
-                    
-                    #print(f"_gradient_ascent_context, log_prob_fn: input_seq.shape: {input_seq.shape}")
-                    #print(f"_gradient_ascent_context, log_prob_fn: input_seq[..., 0:2].shape: {input_seq[..., 0:2].shape}")
-                    current_input = jnp.concatenate([input_seq[..., 0:2], predicted_tokens], axis=-1)
+                    temperature = 0.5
+                    # Add Gumbel noise
+                    gumbel_noise = -jnp.log(-jnp.log(jax.random.uniform(key_gumbel, grid_logits.shape) + 1e-9) + 1e-9)
+                    y = jax.nn.softmax((grid_logits + gumbel_noise) / temperature, axis=-1)
+
+                    # Straight-through: soft in backward, hard in forward
+                    y_hard = jax.lax.stop_gradient(jax.nn.one_hot(jnp.argmax(y, axis=-1), y.shape[-1]) - y) + y
+
+                    current_input = jnp.concatenate([input_seq[..., 0:2], jnp.argmax(y_hard, axis=-1)], axis=-1)
+                
+                    #current_input = jnp.concatenate([input_seq[..., 0:2], predicted_tokens], axis=-1)
         
                 else:
                     row_logits, col_logits, grid_logits = decoder(input_seq, output_seq, context_col, dropout_eval=True)
@@ -874,8 +910,7 @@ class LPN(nn.Module):
         )
 
         best_context, second_best_context = self._select_best_and_second_best_latents(log_probs, latents)
-        print(f"best_context.shape: {best_context.shape}")
-        print(f"second_best_context.shape: {second_best_context.shape}")
+
         return best_context, second_best_context
 
     @classmethod
