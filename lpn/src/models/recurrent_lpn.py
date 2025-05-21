@@ -447,6 +447,7 @@ class LPN(nn.Module):
             first_context, second_context = context, context
         
         elif mode == "recurrent_ga":
+            print(f"evaluate recurrent_ga")
             first_context, second_context = self._get_recurrent_ga_context(
             latents, pairs, grid_shapes, key,
             matrix_size_rows=matrix_size_rows,
@@ -714,7 +715,7 @@ class LPN(nn.Module):
             matrix_size_cols=matrix_size_cols,
             latents=latents,
             )
-            print(f"_gradient_ascent_context, log_prob_fn: context_matrix.shape: {context_matrix.shape}")
+            #print(f"_gradient_ascent_context, log_prob_fn: context_matrix.shape: {context_matrix.shape}")
 
             current_input = input_seq
 
@@ -726,12 +727,12 @@ class LPN(nn.Module):
         
                     _, _, grid_logits = decoder(current_input, current_input, context_col, dropout_eval=True)
 
-                    print(f"_gradient_ascent_context, log_prob_fn: grid_logits.shape: {grid_logits.shape}")
+                    #print(f"_gradient_ascent_context, log_prob_fn: grid_logits.shape: {grid_logits.shape}")
                     predicted_tokens = jnp.argmax(grid_logits, axis=-1)
-                    print(f"_gradient_ascent_context, log_prob_fn: predicted_tokens.shape: {predicted_tokens.shape}")
+                    #print(f"_gradient_ascent_context, log_prob_fn: predicted_tokens.shape: {predicted_tokens.shape}")
                     
-                    print(f"_gradient_ascent_context, log_prob_fn: input_seq.shape: {input_seq.shape}")
-                    print(f"_gradient_ascent_context, log_prob_fn: input_seq[..., 0:2].shape: {input_seq[..., 0:2].shape}")
+                    #print(f"_gradient_ascent_context, log_prob_fn: input_seq.shape: {input_seq.shape}")
+                    #print(f"_gradient_ascent_context, log_prob_fn: input_seq[..., 0:2].shape: {input_seq[..., 0:2].shape}")
                     current_input = jnp.concatenate([input_seq[..., 0:2], predicted_tokens], axis=-1)
         
                 else:
@@ -873,7 +874,8 @@ class LPN(nn.Module):
         )
 
         best_context, second_best_context = self._select_best_and_second_best_latents(log_probs, latents)
-
+        print(f"best_context.shape: {best_context.shape}")
+        print(f"second_best_context.shape: {second_best_context.shape}")
         return best_context, second_best_context
 
     @classmethod
