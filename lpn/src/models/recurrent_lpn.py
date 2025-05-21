@@ -310,7 +310,7 @@ class LPN(nn.Module):
                 current_input = jnp.concatenate([output_seq[..., 0:2], predicted_tokens], axis=-1)
                 
 
-            elif t < matrix_size_cols - 1:
+            else:
                 
                 _, _, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
  
@@ -593,8 +593,8 @@ class LPN(nn.Module):
 
             # Update current input for next step
             current_input = jnp.reshape(output_seq[..., 2:], (*current_input.shape[:-2], *current_input.shape[-2:]))
-            #I change shape only for final step
-            if t >= matrix_size_cols - 1:
+            #I change shape only for the first step
+            if t == 0:
                 current_shape = output_shapes
             
             # Optionally save intermediate outputs
@@ -685,7 +685,6 @@ class LPN(nn.Module):
         include_all_latents: bool = False,
         random_perturbation: Optional[dict] = None,
         stop_gradient_latent_move: bool = True,
-        key_gumbel: Optional[chex.PRNGKey] = None,
         **kwargs,
     ) -> tuple[chex.Array, chex.Array]:
         """Returns the best two contexts using a gradient ascent algorithm.
@@ -735,41 +734,36 @@ class LPN(nn.Module):
             # Use the same latent for all pairs of the same task.
             latents = latents[..., None, :].repeat(output_seq.shape[-2], axis=-2)
 
-            #print(f"_gradient_ascent_context, log_prob_fn: latents.shape: {latents.shape}")
-
             context_matrix = self._convert_to_matrix(
             matrix_size_rows=matrix_size_rows,
             matrix_size_cols=matrix_size_cols,
             latents=latents,
             )
-            #print(f"_gradient_ascent_context, log_prob_fn: context_matrix.shape: {context_matrix.shape}")
 
             current_input = input_seq
 
             for t in range(matrix_size_cols):
 
                 context_col = context_matrix[..., t]
+
+                if t == 0:
+       
+                    row_logits, col_logits, grid_logits = decoder(current_input, output_seq, context_col, dropout_eval=True)
                 
-                if t < matrix_size_cols - 1:
-        
-                    _, _, grid_logits = decoder(current_input, current_input, context_col, dropout_eval=True)
-
-                    temperature = 0.5
-                    # Add Gumbel noise
-                    gumbel_noise = -jnp.log(-jnp.log(jax.random.uniform(key_gumbel, grid_logits.shape) + 1e-9) + 1e-9)
-                    y = jax.nn.softmax((grid_logits + gumbel_noise) / temperature, axis=-1)
-
-                    # Straight-through: soft in backward, hard in forward
-                    y_hard = jax.lax.stop_gradient(jax.nn.one_hot(jnp.argmax(y, axis=-1), y.shape[-1]) - y) + y
-
-                    current_input = jnp.concatenate([input_seq[..., 0:2], jnp.argmax(y_hard, axis=-1)], axis=-1)
+                    # Change current input to the predicted grid to feed it in the next step
+                    predicted_tokens = jnp.argmax(grid_logits, axis=-1)
+                    current_input = jnp.concatenate([output_seq[..., 0:2], predicted_tokens], axis=-1)
                 
-                    #current_input = jnp.concatenate([input_seq[..., 0:2], predicted_tokens], axis=-1)
-        
                 else:
-                    row_logits, col_logits, grid_logits = decoder(input_seq, output_seq, context_col, dropout_eval=True)
-
+                    
+                    _, _, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
+                    # Change current input to the predicted grid to feed it in the next step
+                    predicted_tokens = jnp.argmax(grid_logits, axis=-1)
+                    current_input = jnp.concatenate([output_seq[..., 0:2], predicted_tokens], axis=-1)
+                
+                        
             log_probs = self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq)
+                    
             return log_probs
 
         value_and_grad_log_probs_fn = jax.vmap(
