@@ -30,8 +30,6 @@ class LPN(nn.Module):
         matrix_size_rows: jnp.int32, #new
         matrix_size_cols: jnp.int32, #new
         mode: Literal["mean", "all", "random_search", "gradient_ascent", "matrix"],
-        current_step: Optional[int] = None,
-        gumbel_temperature_schedule_params: Optional[dict] = None,
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
         **mode_kwargs,
@@ -69,14 +67,6 @@ class LPN(nn.Module):
         assert pairs.shape[-4] > 1, f"Number of pairs should be greater than 1, got {pairs.shape[-4]}."
         latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
         
-        key_gumbel = self.make_rng("gumbel")
-
-        temperature = 0.5 # Default if no schedule
-        if gumbel_temperature_schedule_params is not None:
-            temp = gumbel_temperature_schedule_params["initial_temp"] * \
-                (gumbel_temperature_schedule_params["decay_rate"] ** current_step)
-            temperature = jnp.maximum(gumbel_temperature_schedule_params["final_temp"], temp)
-        
 
         if latents_logvar is not None:
             key = self.make_rng("latents")
@@ -96,13 +86,13 @@ class LPN(nn.Module):
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval, 
-            matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows, key_gumbel=key, temperature=temperature)
+            matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
             context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval,
-             matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows, key_gumbel=key, temperature=temperature)
+             matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
 
         elif mode == "cross_attention":
 
@@ -112,7 +102,7 @@ class LPN(nn.Module):
                 matrix_size_cols=matrix_size_cols
             )
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval,
-             matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows, key_gumbel=key, temperature=temperature)
+             matrix_size_cols=matrix_size_cols, matrix_size_rows=matrix_size_rows)
         
         elif mode == "recurrent_ga":
             for arg in ["num_steps", "lr"]:
@@ -128,15 +118,12 @@ class LPN(nn.Module):
                 leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key,
                 matrix_size_rows=matrix_size_rows,
                 matrix_size_cols=matrix_size_cols,
-                key_gumbel = key_gumbel,
                 **mode_kwargs
             )
             loss, metrics = self._loss_from_pair_and_context(
                 context, pairs, grid_shapes, dropout_eval,
                 matrix_size_rows=matrix_size_rows,
                 matrix_size_cols=matrix_size_cols,
-                key_gumbel=key,
-                temperature=temperature,
             )
 
         else:
@@ -257,8 +244,6 @@ class LPN(nn.Module):
         dropout_eval: bool,
         matrix_size_rows: int = 64,
         matrix_size_cols: int = 1,
-        key_gumbel: Optional[chex.PRNGKey] = None,
-        temperature: float = 0.5,
     ):
         """
         Computes the loss for a single pair given a context.
@@ -275,7 +260,7 @@ class LPN(nn.Module):
             metrics: dictionary of metrics of shape (*B,).
         """
         config = self.decoder.config
-        #print(f"calling _loss_from_pair_and_context, temperature: {temperature}")
+
         # Make the input and output sequences.
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
 
@@ -288,39 +273,63 @@ class LPN(nn.Module):
         )
 
         # initial input 
+        grid_shapes_row, grid_shapes_col = grid_shapes[..., 0, 1], grid_shapes[..., 1, 1]
+        
         current_input = input_seq
+
         final_row_logits, final_col_logits, final_grid_logits = None, None, None
 
+        grid_loss = 0.0
 
         for t in range(matrix_size_cols):
 
             # Get the context for the current column
             context_col = context_matrix[..., t]
-            #print(f"context_col: {context_col.shape}")
             
-            if t < matrix_size_cols - 1:
+            if t == 0:
        
-                _, _, grid_logits = self.decoder(current_input, current_input, context_col, dropout_eval)
-                
-
-                # Add Gumbel noise
-                gumbel_noise = -jnp.log(-jnp.log(jax.random.uniform(key_gumbel, grid_logits.shape) + 1e-9) + 1e-9)
-                y = jax.nn.softmax((grid_logits + gumbel_noise) / temperature, axis=-1)
-
-                # Straight-through: soft in backward, hard in forward
-                y_hard = jax.lax.stop_gradient(jax.nn.one_hot(jnp.argmax(y, axis=-1), y.shape[-1]) - y) + y
-
-                current_input = jnp.concatenate([grid_shapes[..., 0], jnp.argmax(y_hard, axis=-1)], axis=-1)
-            
-            else:
                 row_logits, col_logits, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
-
+                
+                #trying to predict the shape of the grid only in the first step
                 final_row_logits = row_logits
                 final_col_logits = col_logits
-                final_grid_logits = grid_logits
+
+                # Copy the grid logits from the last non-padded column of each row to the first column of the next
+                # row, skipping the padding tokens.
+                last_non_padded_logits = self._get_last_non_padded_logits(
+                    grid_logits, grid_shapes_col[..., None, None]
+                )
+                grid_logits = grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
+
+                one_hot_grid_labels = jax.nn.one_hot(pairs[..., 1].reshape(*pairs.shape[:-3], -1), config.vocab_size)
+                grid_losses = -jnp.sum(jax.nn.log_softmax(grid_logits) * one_hot_grid_labels, axis=-1)
+                grid_loss += self._normalized_mean_over_sequence(grid_losses, grid_shapes_row, grid_shapes_col)
+
+                # Change current input to the predicted grid to feed it in the next step
+                predicted_tokens = jnp.argmax(grid_logits, axis=-1)
+                current_input = jnp.concatenate([output_seq[..., 0:2], predicted_tokens], axis=-1)
+                
+
+            elif t < matrix_size_cols - 1:
+                
+                _, _, grid_logits = self.decoder(current_input, output_seq, context_col, dropout_eval)
+ 
+                # Copy the grid logits from the last non-padded column of each row to the first column of the next
+                # row, skipping the padding tokens.
+                last_non_padded_logits = self._get_last_non_padded_logits(
+                    grid_logits, grid_shapes_col[..., None, None]
+                )
+                grid_logits = grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
+
+                one_hot_grid_labels = jax.nn.one_hot(pairs[..., 1].reshape(*pairs.shape[:-3], -1), config.vocab_size)
+                grid_losses = -jnp.sum(jax.nn.log_softmax(grid_logits) * one_hot_grid_labels, axis=-1)
+                grid_loss += self._normalized_mean_over_sequence(grid_losses, grid_shapes_row, grid_shapes_col)
+
+                # Change current input to the predicted grid to feed it in the next step
+                predicted_tokens = jnp.argmax(grid_logits, axis=-1)
+                current_input = jnp.concatenate([output_seq[..., 0:2], predicted_tokens], axis=-1)
+                
            
-        # Compute cross entropy losses.
-        grid_shapes_row, grid_shapes_col = grid_shapes[..., 0, 1], grid_shapes[..., 1, 1]
         # -1 to shift the tokens to [0, max_rows-1]
         one_hot_grid_shapes_row_labels = jax.nn.one_hot(grid_shapes_row - 1, config.max_rows)
         row_loss = -jnp.sum(jax.nn.log_softmax(final_row_logits) * one_hot_grid_shapes_row_labels, axis=-1)
@@ -328,17 +337,6 @@ class LPN(nn.Module):
         # -1 to shift the tokens to [0, max_cols-1]
         one_hot_grid_shapes_col_labels = jax.nn.one_hot(grid_shapes_col - 1, config.max_cols)
         col_loss = -jnp.sum(jax.nn.log_softmax(final_col_logits) * one_hot_grid_shapes_col_labels, axis=-1)
-
-        # Copy the grid logits from the last non-padded column of each row to the first column of the next
-        # row, skipping the padding tokens.
-        last_non_padded_logits = self._get_last_non_padded_logits(
-            final_grid_logits, grid_shapes_col[..., None, None]
-        )
-        final_grid_logits = final_grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
-
-        one_hot_grid_labels = jax.nn.one_hot(pairs[..., 1].reshape(*pairs.shape[:-3], -1), config.vocab_size)
-        grid_losses = -jnp.sum(jax.nn.log_softmax(final_grid_logits) * one_hot_grid_labels, axis=-1)
-        grid_loss = self._normalized_mean_over_sequence(grid_losses, grid_shapes_row, grid_shapes_col)
 
         loss = row_loss + col_loss + grid_loss
         metrics = {
@@ -444,8 +442,6 @@ class LPN(nn.Module):
         """
         latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
 
-        key, key_gumbel = jax.random.split(key)
-
         if latents_logvar is not None:
             assert key is not None, "'key' argument required for variational inference."
             key, key_latents = jax.random.split(key)
@@ -479,7 +475,6 @@ class LPN(nn.Module):
             latents, pairs, grid_shapes, key,
             matrix_size_rows=matrix_size_rows,
             matrix_size_cols=matrix_size_cols,
-            key_gumbel=key_gumbel,
             **mode_kwargs
             )
             if second_context is None:

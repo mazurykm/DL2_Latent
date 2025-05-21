@@ -89,7 +89,7 @@ class Trainer:
 
         def eval_one_step(batch, state: TrainState) -> dict:
             pairs, grid_shapes, key = batch
-            random_search_key, perturbation_key, latents_key, latents_init_key, gumbel_key = jax.random.split(key, 5)
+            random_search_key, perturbation_key, latents_key, latents_init_key = jax.random.split(key, 4)
             _, metrics = state.apply_fn(
                 {"params": state.params},
                 pairs,
@@ -105,7 +105,6 @@ class Trainer:
                     "gradient_ascent_random_perturbation": perturbation_key,
                     "latents": latents_key,
                     "latents_init": latents_init_key,
-                    "gumbel": gumbel_key,
                 },
                 **self.train_inference_kwargs,
             )
@@ -358,12 +357,6 @@ class Trainer:
             matrix_size_cols=self.model.decoder.config.matrix_size_cols,
             mode=self.train_inference_mode,
             rngs=key,
-            current_step=state.step,
-            gumbel_temperature_schedule_params=  {
-            "initial_temp": 1.0, # self.config.gumbel_initial_temp or fixed
-            "final_temp": 0.1,   # self.config.gumbel_final_temp or fixed
-            "decay_rate": 0.999  # self.config.gumbel_decay_rate or fixed
-            },
             **self.train_inference_kwargs,
         )
         grads = grads["params"]
