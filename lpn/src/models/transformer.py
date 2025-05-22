@@ -216,6 +216,9 @@ class DecoderTransformer(nn.Module):
         """
         x = self.embed_inputs(input_seq, output_seq, context, dropout_eval)
 
+        # Store the original input for the residual connection
+        residual_x = x
+
         # Transformer block.
         causal_pad_mask = self.make_causal_pad_mask(
             input_grid_shape=input_seq[..., :2], output_grid_shape=output_seq[..., :2]
@@ -226,7 +229,9 @@ class DecoderTransformer(nn.Module):
                 dropout_eval=dropout_eval,
                 pad_mask=causal_pad_mask,
             )
-
+        
+        # Add the residual connection around the entire transformer block
+        x = x + residual_x
         grid_shape_row_logits, grid_shape_col_logits, output_grid_logits = self.extract_logits(
             x, input_seq.shape[-1]
         )
