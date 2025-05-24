@@ -1,4 +1,4 @@
-from typing import Literal, Optional, Union 
+from typing import Literal, Optional
 import math
 from functools import partial
 
@@ -9,7 +9,6 @@ import jax.numpy as jnp
 from jax.numpy.linalg import norm
 from jax.tree_util import tree_map
 import optax
-# from jax.debug import print as jax_print # Uncomment for debugging
 
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.models.utils import EncoderTransformerConfig, DecoderTransformerConfig
@@ -25,103 +24,187 @@ class LPN(nn.Module):
         pairs: chex.Array,
         grid_shapes: chex.Array,
         dropout_eval: bool,
-        mode: Literal["mean", "all", "random_search", "gradient_ascent"],
+        mode: Literal["mean", "all", "random_search", "gradient_ascent", "cross_attention", "cross_attention_ga", "cross_attention_loo"],
         prior_kl_coeff: Optional[float] = None,
         pairwise_kl_coeff: Optional[float] = None,
-        use_cross_attention: bool = False, 
         **mode_kwargs,
-    ) -> tuple[chex.Array, dict[str, chex.Array]]:
-        
-        assert pairs.shape[-4] > 1, f"Number of pairs should be greater than 1, got {pairs.shape[-4]}."
-        num_program_pairs = pairs.shape[-4] 
+    ):
+        """
+        Forward pass of the LPN model.
 
+        Args:
+            pairs: input data as tokens. Shape (*B, N, R, C, 2).
+                - N: number of (input, output) pairs per progam.
+                - R: number of rows.
+                - C: number of columns.
+                - 2: two channels (input and output)
+            grid_shapes: shapes of the grids (e.g. 30x30). Shape (*B, N, 2, 2). The last two dimension
+                represents (rows, columns) of two channels, e.g. [[R_input, R_output], [C_input, C_output]].
+                Expects grid shapes values to be in [1, max_rows] and [1, max_cols].
+            dropout_eval: if false dropout is applied otherwise it is not.
+            mode: mode of the forward pass. Can be "mean" or "all".
+                - "mean": decodes the output using the mean latent of all the other pairs.
+                - "all": decodes the output N-1 times, each time using a different latent from the other
+                    pairs.
+                - "random_search": randomly search for a latent that best explains the (input, output) pairs
+                    and then decodes the output using that latent.
+                - "gradient_ascent": uses gradient ascent to find the latent that best explains the
+                    (input, output) pairs and then decodes the output using that latent
+            prior_kl_coeff: KL divergence coefficient for the variational inference. Required when using
+                variational inference.
+            pairwise_kl_coeff: KL divergence coefficient for the pairwise KL divergence. Optional.
+            mode_kwargs: additional keyword arguments for the inference mode (e.g. 'remove_encoder_latents').
+
+        Returns:
+            loss: loss value.
+            metrics: dictionary of metrics.
+        """
+        assert pairs.shape[-4] > 1, f"Number of pairs should be greater than 1, got {pairs.shape[-4]}."
         latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
 
         if latents_logvar is not None:
-            key_sample_latents = self.make_rng("latents")
-            base_latents, prior_kl_loss, kl_metrics = self._sample_latents(latents_mu, latents_logvar, key_sample_latents)
+            key = self.make_rng("latents")
+            latents, prior_kl_loss, kl_metrics = self._sample_latents(latents_mu, latents_logvar, key)
+            # Compute Gaussian KL between all the latents from each batch.
             pairwise_kl_loss = self._compute_pairwise_gaussian_kl(latents_mu, latents_logvar).mean()
             kl_metrics["pairwise_kl"] = pairwise_kl_loss
         else:
-            base_latents, prior_kl_loss, pairwise_kl_loss, kl_metrics = latents_mu, None, None, {}
+            latents, prior_kl_loss, pairwise_kl_loss, kl_metrics = latents_mu, None, None, {}
 
         if mode_kwargs.get("remove_encoder_latents", False):
-            key_init_latents = self.make_rng("latents_init")
-            base_latents = jax.random.normal(key_init_latents, base_latents.shape)
-
-        current_context_source_latents = base_latents
-        
-        if use_cross_attention:
-            H = base_latents.shape[-1]
-            sqrt_dh = jnp.sqrt(float(H))
-            query = base_latents.mean(axis=-2, keepdims=True) 
-            key_val_attn = base_latents 
-            attn_scores = jnp.einsum('...qh,...kh->...qk', query, key_val_attn) / sqrt_dh
-            attn_weights = jax.nn.softmax(attn_scores, axis=-1)
-            attended_context = jnp.einsum('...qk,...kh->...qh', attn_weights, key_val_attn).squeeze(axis=-2)
-
-            leading_dims_shape = attended_context.shape[:-1] 
-            tile_repeats = [1] * len(leading_dims_shape) + [num_program_pairs, 1] 
-            current_context_source_latents = jnp.tile(attended_context[..., None, :], tile_repeats)
-
-        leave_one_out_source_latents = make_leave_one_out(current_context_source_latents, axis=-2)
-
+            key = self.make_rng("latents_init")
+            latents = jax.random.normal(key, latents.shape)
+        leave_one_out_latents = make_leave_one_out(latents, axis=-2)  # (*B, N, N-1, H)
         if mode == "mean":
-            context_for_loss = leave_one_out_source_latents.mean(axis=-2)
-            loss, metrics = self._loss_from_pair_and_context(context_for_loss, pairs, grid_shapes, dropout_eval)
+            # Compute the context vector by taking the mean of all but one latents.
+            context = leave_one_out_latents.mean(axis=-2)  # (*B, N, H)
+            # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+
+        elif mode == "cross_attention_ga":
+            test_input = pairs[..., -1:, :, :, :]       # (B, 1, R, C, 2)
+            test_shape = grid_shapes[..., -1:, :, :]    # (B, 1, 2, 2)
+            support_latents = latents[..., :-1, :]      # (B, N-1, H)
+
+            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)  # (B, H)
+            query = test_latent[..., None, :]           # (B, 1, H)
+            keys = support_latents                      # (B, N-1, H)
+            values = support_latents                    # (B, N-1, H)
+
+            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)
+            context_init = jnp.matmul(attn_weights, values).squeeze(axis=-2)  # (B, H)
+            context_init = context_init[:, None, :]     # (B, 1, H)
+
+            for arg in ["num_steps", "lr"]:
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'cross_attention_ga' mode."
+
+            if mode_kwargs.get("random_perturbation", None) is not None:
+                key = self.make_rng("ga_cross_random_perturbation")
+            else:
+                key = self.make_rng("ga_cross")
+
+            mode_kwargs = dict(mode_kwargs)
+            num_steps = mode_kwargs.pop("num_steps")
+            lr = mode_kwargs.pop("lr")
+
+            context, _ = self._get_gradient_ascent_context(
+                context_init,
+                pairs,                    
+                grid_shapes,
+                key,
+                num_steps=num_steps,
+                lr=lr,
+                include_mean_latent=False,  
+                include_all_latents=False,
+                random_perturbation=None,
+                **mode_kwargs,
+            )
+
+            context = jnp.tile(context, (1, pairs.shape[1], 1))
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+
+
+        elif mode == "cross_attention_loo":
+            test_inputs = pairs[..., None, :, :, :, :] 
+            test_shapes = grid_shapes[..., None, :, :, :] 
+            B, N = pairs.shape[:2]
+            test_inputs_flat = test_inputs.reshape(B * N, 1, *pairs.shape[2:])
+            test_shapes_flat = test_shapes.reshape(B * N, 1, *grid_shapes.shape[2:])
+            test_latents_flat = self.encoder(test_inputs_flat, test_shapes_flat, dropout_eval)[0].squeeze(-2)  
+            test_latents = test_latents_flat.reshape(B, N, -1)
+            query = test_latents[..., None, :]                   
+            keys = leave_one_out_latents                       
+            values = leave_one_out_latents  
+
+            attn_logits = jnp.einsum("bnqh,bnkh->bnqk", query, keys) / math.sqrt(keys.shape[-1])  
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)                                  
+            context = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
+
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+
         elif mode == "all":
+            # Compute the loss for each pair using all but one latents. Shape (*B, N, N-1).
             loss, metrics = jax.vmap(
                 self._loss_from_pair_and_context, in_axes=(-2, None, None, None), out_axes=-1
-            )(leave_one_out_source_latents, pairs, grid_shapes, dropout_eval)
-            context_for_logging = current_context_source_latents
-        elif mode == "random_search" or mode == "gradient_ascent":
-            leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)
-            leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)
-            
-            if mode == "random_search":
-                for arg in ["num_samples", "scale"]: assert arg in mode_kwargs
-                key_rs = self.make_rng("random_search")
-                context_for_loss, _ = self._get_random_search_context(
-                    leave_one_out_source_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key_rs, **mode_kwargs
-                )
-            else: 
-                for arg in ["num_steps", "lr"]: assert arg in mode_kwargs
-                key_ga_name = "gradient_ascent_random_perturbation" 
-                key_ga = self.make_rng(key_ga_name) if mode_kwargs.get("random_perturbation") else None
-                context_for_loss, _ = self._get_gradient_ascent_context(
-                    leave_one_out_source_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key_ga, **mode_kwargs
-                )
-            loss, metrics = self._loss_from_pair_and_context(context_for_loss, pairs, grid_shapes, dropout_eval)
+            )(leave_one_out_latents, pairs, grid_shapes, dropout_eval)
+            # For logging purposes
+            context = latents
+            distance_context_latents = norm(latents[..., None, :] - leave_one_out_latents, axis=-1)
+        elif mode == "random_search":
+            for arg in ["num_samples", "scale"]:
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'random_search' training mode."
+            key = self.make_rng("random_search")
+            # Repeat all the pairs and grid shapes except the one to leave out.
+            leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
+            leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
+            # Get the best context for each pair using random search.
+            context, _ = self._get_random_search_context(
+                leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
+            )  # (*B, N, H)
+            # Compute the loss for each pair using the context from the random search. Shape (*B, N).
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+        elif mode == "gradient_ascent":
+            for arg in ["num_steps", "lr"]:
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'gradient_ascent' training mode."
+            if mode_kwargs.get("random_perturbation", None) is not None:
+                key = self.make_rng("gradient_ascent_random_perturbation")
+            else:
+                key = None
+            # Repeat all the pairs and grid shapes except the one to leave out.
+            leave_one_out_pairs = make_leave_one_out(pairs, axis=-4)  # (*B, N, N-1, R, C, 2)
+            leave_one_out_grid_shapes = make_leave_one_out(grid_shapes, axis=-3)  # (*B, N, N-1, 2, 2)
+            # Get the best context for each pair using gradient ascent.
+            context, _ = self._get_gradient_ascent_context(
+                leave_one_out_latents, leave_one_out_pairs, leave_one_out_grid_shapes, key, **mode_kwargs
+            )  # (*B, N, H)
+            # Compute the loss for each pair using the context from the gradient ascent. Shape (*B, N).
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         else:
             raise ValueError(f"Unsupported mode: {mode}")
-
-        final_context_for_metrics = context_for_logging if mode == "all" else context_for_loss
-        loo_base_latents = make_leave_one_out(base_latents, axis=-2)
-        leave_one_out_final_contexts = make_leave_one_out(final_context_for_metrics, axis=-2)
-        
-        cosine_between_contexts = jnp.einsum("...h,...nh->...n", final_context_for_metrics, leave_one_out_final_contexts) / (
-            norm(final_context_for_metrics, axis=-1)[..., None] * norm(leave_one_out_final_contexts, axis=-1) + 1e-5
+        leave_one_out_contexts = make_leave_one_out(context, axis=-2)
+        cosine_between_contexts = jnp.einsum("...h,...nh->...n", context, leave_one_out_contexts) / (
+            norm(context, axis=-1)[..., None] * norm(leave_one_out_contexts, axis=-1) + 1e-5
         )
-        cosine_between_base_latents = jnp.einsum("...h,...nh->...n", base_latents, loo_base_latents) / (
-            norm(base_latents, axis=-1)[..., None] * norm(loo_base_latents, axis=-1) + 1e-5
+        cosine_between_latents = jnp.einsum("...h,...nh->...n", latents, leave_one_out_latents) / (
+            norm(latents, axis=-1)[..., None] * norm(leave_one_out_latents, axis=-1) + 1e-5
         )
-        
-        dist_ctx_lat = norm(final_context_for_metrics - base_latents, axis=-1)
-
+        if mode != "all":
+            distance_context_latents = norm(context - latents, axis=-1)
         metrics.update(
-            latents_norm=norm(base_latents, axis=-1),
-            context_norm=norm(final_context_for_metrics, axis=-1),
-            distance_context_latents=dist_ctx_lat,
-            distance_between_contexts=norm(final_context_for_metrics[..., None, :] - leave_one_out_final_contexts, axis=-1),
+            latents_norm=norm(latents, axis=-1),
+            context_norm=norm(context, axis=-1),
+            distance_context_latents=distance_context_latents,
+            distance_between_contexts=norm(context[..., None, :] - leave_one_out_contexts, axis=-1),
             cosine_between_contexts=cosine_between_contexts,
-            distance_between_latents=norm(base_latents[..., None, :] - loo_base_latents, axis=-1),
-            cosine_between_latents=cosine_between_base_latents,
+            distance_between_latents=norm(latents[..., None, :] - leave_one_out_latents, axis=-1),
+            cosine_between_latents=cosine_between_latents,
         )
-        
         loss, metrics = tree_map(jnp.mean, (loss, metrics))
         metrics.update(kl_metrics)
         if prior_kl_loss is not None:
-            if prior_kl_coeff is None: raise ValueError("Prior KL coeff required for VI.")
+            if prior_kl_coeff is None:
+                raise ValueError("Prior KL coefficient is required when using variational inference.")
             loss += prior_kl_coeff * prior_kl_loss
             if pairwise_kl_coeff is not None:
                 loss += pairwise_kl_coeff * pairwise_kl_loss
@@ -130,26 +213,39 @@ class LPN(nn.Module):
 
     @staticmethod
     def _compute_pairwise_gaussian_kl(mu: chex.Array, log_var: chex.Array, eps: float = 1e-7) -> chex.Array:
-        mu1 = mu[..., :, None, :]
-        mu2 = mu[..., None, :, :]
-        log_var1 = log_var[..., :, None, :]
-        log_var2 = log_var[..., None, :, :]
+        """
+        Compute pairwise KL divergence between Gaussian distributions.
+
+        Args:
+            mu: mean of shape (*B, N, H)
+            log_var: log variance of shape (*B, N, H)
+
+        Returns:
+            Mean KL divergence of shape B where before averaging, KL[..., i, j] is
+            KL(N(mu[..., i], exp(log_var[..., i])) || N(mu[..., j], exp(log_var[..., j])))
+        """
+        # Expand dimensions for broadcasting
+        mu1 = mu[..., :, None, :]  # (*B, N, 1, H)
+        mu2 = mu[..., None, :, :]  # (*B, 1, N, H)
+        log_var1 = log_var[..., :, None, :]  # (*B, N, 1, H)
+        log_var2 = log_var[..., None, :, :]  # (*B, 1, N, H)
+        # KL divergence formula for Gaussians:
+        # KL(N1||N2) = 0.5 * (log(var2/var1) + var1/var2 + (mu1-mu2)^2/var2 - 1)
         var1, var2 = jnp.exp(log_var1), jnp.exp(log_var2)
         log_var_ratio = log_var2 - log_var1
         var_ratio = var1 / (var2 + eps)
         mu_diff_sq = (mu1 - mu2) ** 2 / (var2 + eps)
-        kl = jnp.sum(0.5 * (log_var_ratio + var_ratio + mu_diff_sq - 1), axis=-1)
+        kl = jnp.sum(0.5 * (log_var_ratio + var_ratio + mu_diff_sq - 1), axis=-1)  # (*B, N, N)
+        # Average over the pairwise matrices to return a single KL divergence measure of shape (*B,)
+        # Mask the diagonal to avoid comparing the same latents.
         num_pairs = mu.shape[-2]
-        if num_pairs > 1:
-             kl = jnp.sum(jnp.where(jnp.eye(num_pairs) == 0, kl, 0), axis=(-1, -2)) / (num_pairs * (num_pairs - 1))
-        else: 
-             kl = jnp.zeros_like(kl[...,0,0]) 
+        kl = jnp.sum(jnp.where(jnp.eye(num_pairs) == 0, kl, 0), axis=(-1, -2)) / (num_pairs * (num_pairs - 1))
         return kl
 
     @staticmethod
     def _sample_latents(
         latents_mu: chex.Array, latents_logvar: chex.Array, key: chex.PRNGKey
-    ) -> tuple[chex.Array, chex.Array, dict]:
+    ):
         latents_std = jnp.exp(0.5 * latents_logvar)
         latents = latents_mu + latents_std * jax.random.normal(key, latents_mu.shape)
         kl_loss = jnp.mean(
@@ -164,161 +260,263 @@ class LPN(nn.Module):
         return latents, kl_loss, kl_metrics
 
     def _loss_from_pair_and_context(
-        self, context: chex.Array, pairs: chex.Array, grid_shapes: chex.Array, dropout_eval: bool,
-    ) -> tuple[chex.Array, dict]:
-        config = self.decoder.config
-        input_seq, output_seq = LPN._flatten_input_output_for_decoding(pairs, grid_shapes)
+        self,
+        context: chex.Array,
+        pairs: chex.Array,
+        grid_shapes: chex.Array,
+        dropout_eval: bool,
+    ):
+        """
+        Computes the loss for a single pair given a context.
 
-        context_for_decoder = context
-        if context.ndim == input_seq.ndim - 1 and \
-           context.shape[:-1] == input_seq.shape[:-2] and \
-           hasattr(self.decoder.config, 'hidden_size') and \
-           context.shape[-1] == self.decoder.config.hidden_size:
-            
-            num_program_pairs_in_seq = input_seq.shape[-2]
-            axis_for_new_N_dim = context.ndim -1 
-            context_expanded = jnp.expand_dims(context, axis=axis_for_new_N_dim) 
-            
-            tile_repeats_list = [1] * context_expanded.ndim
-            tile_repeats_list[axis_for_new_N_dim] = num_program_pairs_in_seq
-            context_for_decoder = jnp.tile(context_expanded, tile_repeats_list)
-        
-        row_logits, col_logits, grid_logits = self.decoder(input_seq, output_seq, context_for_decoder, dropout_eval)
-        
+        Args:
+            context: context vector. Shape (*B, H).
+            pairs: input data as tokens. Shape (*B, R, C, 2).
+            grid_shapes: shapes of the grids. Shape (*B, 2, 2).
+            dropout_eval: if false dropout is applied otherwise it is not.
+
+        Returns:
+            loss: loss value. Shape (*B,).
+            metrics: dictionary of metrics of shape (*B,).
+        """
+        config = self.decoder.config
+
+        # Make the input and output sequences.
+        input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
+
+        # Decode the output sequence (teacher forcing).
+        row_logits, col_logits, grid_logits = self.decoder(input_seq, output_seq, context, dropout_eval)
+
+        # Compute cross entropy losses.
         grid_shapes_row, grid_shapes_col = grid_shapes[..., 0, 1], grid_shapes[..., 1, 1]
+        # -1 to shift the tokens to [0, max_rows-1]
         one_hot_grid_shapes_row_labels = jax.nn.one_hot(grid_shapes_row - 1, config.max_rows)
         row_loss = -jnp.sum(jax.nn.log_softmax(row_logits) * one_hot_grid_shapes_row_labels, axis=-1)
+
+        # -1 to shift the tokens to [0, max_cols-1]
         one_hot_grid_shapes_col_labels = jax.nn.one_hot(grid_shapes_col - 1, config.max_cols)
         col_loss = -jnp.sum(jax.nn.log_softmax(col_logits) * one_hot_grid_shapes_col_labels, axis=-1)
-        
+
+        # Copy the grid logits from the last non-padded column of each row to the first column of the next
+        # row, skipping the padding tokens.
         last_non_padded_logits = self._get_last_non_padded_logits(
-            grid_logits, grid_shapes_col[..., None, None] 
+            grid_logits, grid_shapes_col[..., None, None]
         )
-        if config.max_cols > 0 and grid_logits.shape[-2] >= config.max_cols :
-            if hasattr(last_non_padded_logits, 'shape') and last_non_padded_logits.shape[-2] > 0 : 
-                grid_logits = grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
+        grid_logits = grid_logits.at[..., config.max_cols :: config.max_cols, :].set(last_non_padded_logits)
 
         one_hot_grid_labels = jax.nn.one_hot(pairs[..., 1].reshape(*pairs.shape[:-3], -1), config.vocab_size)
         grid_losses = -jnp.sum(jax.nn.log_softmax(grid_logits) * one_hot_grid_labels, axis=-1)
         grid_loss = self._normalized_mean_over_sequence(grid_losses, grid_shapes_row, grid_shapes_col)
-        loss = row_loss + col_loss + grid_loss 
+
+        loss = row_loss + col_loss + grid_loss
         metrics = {
-            "shape_row_loss": row_loss, "shape_col_loss": col_loss,
-            "grid_loss": grid_loss, "total_loss": loss,
+            "shape_row_loss": row_loss,
+            "shape_col_loss": col_loss,
+            "grid_loss": grid_loss,
+            "total_loss": loss,
         }
         return loss, metrics
 
     def _normalized_mean_over_sequence(
         self, grid_seq: chex.Array, num_rows: chex.Array, num_cols: chex.Array
     ) -> chex.Array:
+        """
+        Computes the mean of the sequence (e.g. losses or log probs) over the sequence length. Masks the
+        losses corresponding to the padding tokens in the sequence length. Expects num_rows to be in
+        [1, max_rows] and num_cols to be in [1, max_cols].
+
+        Args:
+            grid_seq: sequence of e.g. losses. Shape (*B, R*C).
+            num_rows: number of rows. Shape (*B,).
+            num_cols: number of columns. Shape (*B,).
+
+        Returns:
+            mean_seq: mean sequence over the sequence length. Shape (*B,).
+        """
         max_rows, max_cols = self.decoder.config.max_rows, self.decoder.config.max_cols
-        num_rows_int = num_rows.astype(jnp.int32)
-        num_cols_int = num_cols.astype(jnp.int32)
-        row_arange_b = jnp.arange(max_rows).reshape( *( (1,)*num_rows_int.ndim + (max_rows,)) )
-        col_arange_b = jnp.arange(max_cols).reshape( *( (1,)*num_cols_int.ndim + (max_cols,)) )
-        grid_row_mask = row_arange_b < num_rows_int[..., None]
-        grid_col_mask = col_arange_b < num_cols_int[..., None]
-        grid_pad_mask_2d = grid_row_mask[..., :, None] & grid_col_mask[..., None, :]
-        grid_pad_mask = grid_pad_mask_2d.reshape(*grid_pad_mask_2d.shape[:-2], -1)
-        grid_seq_masked = jnp.where(grid_pad_mask, grid_seq, 0)
-        mean_seq = jnp.sum(grid_seq_masked, axis=-1) / (jnp.sum(grid_pad_mask, axis=-1) + 1e-7)
+        row_arange_broadcast = jnp.arange(max_rows).reshape(*len(num_rows.shape) * (1,), max_rows)
+        col_arange_broadcast = jnp.arange(max_cols).reshape(*len(num_cols.shape) * (1,), max_cols)
+        grid_row_mask = row_arange_broadcast < num_rows[..., None]
+        grid_col_mask = col_arange_broadcast < num_cols[..., None]
+        grid_pad_mask = grid_row_mask[..., None] & grid_col_mask[..., None, :]
+        grid_pad_mask = grid_pad_mask.reshape(*grid_pad_mask.shape[:-2], -1)
+        # Mask the elements corresponding to the padding tokens.
+        grid_seq = jnp.where(grid_pad_mask, grid_seq, 0)
+        # Mean over the sequence length, normalizing by the number of non-padded tokens.
+        mean_seq = jnp.sum(grid_seq, axis=-1) / (jnp.sum(grid_pad_mask, axis=-1) + 1e-5)
         return mean_seq
-    
+
     def generate_output(
         self,
-        pairs: chex.Array,        
-        grid_shapes: chex.Array,  
-        input: chex.Array,        
-        input_grid_shape: chex.Array, 
+        pairs: chex.Array,
+        grid_shapes: chex.Array,
+        input: chex.Array,
+        input_grid_shape: chex.Array,
         key: Optional[chex.PRNGKey],
         dropout_eval: bool,
-        mode: Literal["mean", "first", "random_search", "gradient_ascent"],
+        mode: Literal["mean", "first", "random_search", "gradient_ascent", "cross_attention", "cross_attention_ga"],
+        *,
         return_two_best: bool = False,
-        use_cross_attention: bool = True, 
         **mode_kwargs,
-    ) -> Union[tuple[chex.Array, chex.Array, dict], tuple[chex.Array, chex.Array, chex.Array, chex.Array, dict]]:
-        input_grid = input 
+    ):
+        """
+        Predicts the output grid given an input grid and other (input, output) pairs and shapes that follow
+        the same transformation. Returns two predictions: the best prediction and the second best prediction.
 
+        Args:
+            pairs: input data as tokens. Shape (*B, N, R, C, 2).
+                - N: number of (input, output) pairs per progam.
+                - R: number of rows.
+                - C: number of columns.
+                - 2: two channels (input and output)
+            grid_shapes: shapes of the grids (e.g. 30x30). Shape (*B, N, 2, 2). The last two dimension
+                represents (rows, columns) of two channels, e.g. [[R_input, R_output], [C_input, C_output]].
+                Expects grid shapes values to be in [1, max_rows] and [1, max_cols].
+            input: input grid. Shape (*B, R, C).
+            input_grid_shape: shape of the input grid. Shape (*B, 2). Number of rows and columns of the
+                input grid.
+            key: optional random key for stochastic generating processes. Used in "random_search" mode, in
+                "gradient_ascent" mode when using random_perturbations, and in variational inference. None
+                or shape (*B, 2). If None, the key is not used.
+            dropout_eval: if false dropout is applied otherwise it is not.
+            mode: mode of the forward pass. Can be "mean", "first", or "random_search".
+                - "mean": decodes the output using the mean latent from the (input, output) pairs.
+                - "first": decodes the output using the first latent.
+                - "random_search": randomly search for a latent that best explains the (input, output) pairs
+                    and then decodes the output using that latent. Requires 'key' argument to not be None.
+                    Also requires mode_kwargs to have the following arguments: 'num_samples' and 'scale'.
+                    Other optional arguments are 'scan_batch_size' (default to all samples),
+                    'include_mean_latent' (default to True), and 'include_all_latents' (default to False).
+                    Computes maximum likelihood over (X + num_samples) latents, with X in [1, N, N+1] and
+                    where N is the number of (input, output) pairs and num_samples is the number of random
+                    samples.
+                - "gradient_ascent": uses gradient ascent to find the latent that best explains the
+                    (input, output) pairs and then decodes the output using that latent. Requires mode_kwargs
+                    to have the following arguments: 'num_steps' and 'lr'. Other optional arguments are
+                    'include_mean_latent' (default to True) and 'include_all_latents' (default to False).
+                    Computes gradient ascent on decoder likelihood for 'num_steps' steps with learning rate
+                    'lr'.
+            return_two_best: if true returns the two best predictions, otherwise returns the best prediction.
+            mode_kwargs: additional keyword arguments for the inference mode (e.g. 'remove_encoder_latents').
+
+        Returns:
+            first_output_grids: most likely predicted output grids. Shape (*B, R, C).
+            first_output_shapes: shapes of the most likely output grids. Shape (*B, 2). Number of rows and
+                columns of the output grids. Grid shapes values are in [1, max_rows] and [1, max_cols].
+            if return_two_best, also returns:
+                second_output_grids: second most likely predicted output grids. Shape (*B, R, C).
+                second_output_shapes: shapes of the second most likely output grids. Shape (*B, 2).
+            info: dictionary of additional information.
+        """
         latents_mu, latents_logvar = self.encoder(pairs, grid_shapes, dropout_eval)
 
-        _key_for_sampling, _key_for_search_or_ga, _key_for_latent_init = None, None, None
-        if key is not None: 
-            key_parts = jax.random.split(key, 3)
-            _key_for_sampling, _key_for_search_or_ga, _key_for_latent_init = key_parts[0], key_parts[1], key_parts[2]
-
         if latents_logvar is not None:
-            assert _key_for_sampling is not None, "Key required for VI sampling in generate_output."
-            example_latents, *_ = self._sample_latents(latents_mu, latents_logvar, _key_for_sampling)
+            assert key is not None, "'key' argument required for variational inference."
+            key, key_latents = jax.random.split(key)
+            latents, *_ = self._sample_latents(latents_mu, latents_logvar, key_latents)
         else:
-            example_latents = latents_mu
+            latents = latents_mu
 
         if mode_kwargs.get("remove_encoder_latents", False):
-            assert _key_for_latent_init is not None, "Key required for remove_encoder_latents."
-            example_latents = jax.random.normal(_key_for_latent_init, example_latents.shape)
-
-        source_latents_for_gen_modes = example_latents
-
-        #print(f"1st generate output: Latents shape: {example_latents.shape}")
-
-        if use_cross_attention:
-            H = example_latents.shape[-1]
-            sqrt_dh = jnp.sqrt(float(H))
-            query = example_latents.mean(axis=-2, keepdims=True)
-            key_val_attn = example_latents
-            attn_scores = jnp.einsum('...qh,...kh->...qk', query, key_val_attn) / sqrt_dh
-            attn_weights = jax.nn.softmax(attn_scores, axis=-1)        
-            attended_context_gen = jnp.einsum('...qk,...kh->...qh', attn_weights, key_val_attn).squeeze(axis=-2)
-            #print(f"1.5nd generate output, after crossatt: Latents shape: {attended_context_gen.shape}")
-            source_latents_for_gen_modes = attended_context_gen[..., None, :] 
-
-        #print(f"2nd generate output, after crossatt: Latents shape: {source_latents_for_gen_modes.shape}")
-
+            assert key is not None, "'key' argument required when 'remove_encoder_latents' is True."
+            latents = jax.random.normal(key, latents.shape)
         if mode == "mean":
-            final_gen_context = source_latents_for_gen_modes.mean(axis=-2) 
-            first_context, second_context = final_gen_context, final_gen_context
+            context = latents.mean(axis=-2)
+            first_context, second_context = context, context
 
-            #print(f"3rd generate output, after mean: Latents shape: {first_context.shape}")
+        elif mode == "cross_attention":
+            test_input = jnp.stack([input, input], axis=-1)  
+            test_input = test_input[:, None] 
+            test_shape = jnp.tile(input_grid_shape[:, None, None, :], (1, 1, 2, 1)) 
+
+            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2) 
+            query = test_latent[..., None, :]  
+            keys = latents 
+            values = latents  
+            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1]) 
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
+            context = jnp.matmul(attn_weights, values).squeeze(axis=-2) 
+            first_context, second_context = context, context
+
+        elif mode == "cross_attention_ga":
+            assert key is not None, "'key' argument required for 'cross_attention_ga' mode."
+            for arg in ["num_steps", "lr"]:
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'cross_attention_ga' mode."
+
+            test_input = jnp.stack([input, input], axis=-1)[:, None]  
+            test_shape = jnp.tile(input_grid_shape[:, None, None, :], (1, 1, 2, 1)) 
+            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)  
+            query = test_latent[..., None, :]
+            keys = latents
+            values = latents
+            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)
+            context_init = jnp.matmul(attn_weights, values).squeeze(axis=-2)[:, None, :] 
+
+            mode_kwargs = dict(mode_kwargs)
+            num_steps = mode_kwargs.pop("num_steps")
+            lr = mode_kwargs.pop("lr")
+
+            context, _ = self._get_gradient_ascent_context(
+                context_init,
+                pairs,
+                grid_shapes,
+                key,
+                num_steps=num_steps,
+                lr=lr,
+                include_mean_latent=False,
+                include_all_latents=False,
+                random_perturbation=None,
+                **mode_kwargs,
+            )
+
+            first_context, second_context = context.squeeze(axis=1), context.squeeze(axis=1)
+
 
         elif mode == "first":
-            final_gen_context = source_latents_for_gen_modes[..., 0, :] 
-            first_context, second_context = final_gen_context, final_gen_context
+            context = latents[..., 0, :]
+            first_context, second_context = context, context
         elif mode == "random_search":
-            assert _key_for_search_or_ga is not None, "Key required for random_search in generate_output."
-            for arg in ["num_samples", "scale"]: assert arg in mode_kwargs
+            assert key is not None, "'key' argument required for 'random_search' inference mode."
+            for arg in ["num_samples", "scale"]:
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'random_search' inference mode."
+
             first_context, second_context = self._get_random_search_context(
-                source_latents_for_gen_modes, pairs, grid_shapes, _key_for_search_or_ga, **mode_kwargs
+                latents, pairs, grid_shapes, key, **mode_kwargs
             )
         elif mode == "gradient_ascent":
-            for arg in ["num_steps", "lr"]: assert arg in mode_kwargs
+            for arg in ["num_steps", "lr"]:
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'gradient_ascent' inference mode."
+
             first_context, second_context = self._get_gradient_ascent_context(
-                source_latents_for_gen_modes, pairs, grid_shapes, _key_for_search_or_ga, **mode_kwargs
+                latents, pairs, grid_shapes, key, **mode_kwargs
             )
         else:
             raise ValueError(f"Unsupported mode: {mode}")
 
-        info = {"context": first_context} 
+        info = {"context": first_context}
 
         if return_two_best:
-            contexts_to_generate = jnp.stack([first_context, second_context], axis=0)
-            output_grids_stacked, output_shapes_stacked = jax.vmap(
-                partial(self._generate_output_from_context, 
-                        input_grid=input_grid, 
-                        input_grid_shape=input_grid_shape, 
-                        dropout_eval=dropout_eval)
-            )(contexts_to_generate)
-            
-            first_output_grids, second_output_grids = output_grids_stacked[0], output_grids_stacked[1]
-            first_output_shapes, second_output_shapes = output_shapes_stacked[0], output_shapes_stacked[1]
+            output_grids, output_shapes = jax.vmap(
+                partial(
+                    self._generate_output_from_context,
+                    input=input,
+                    input_grid_shape=input_grid_shape,
+                    dropout_eval=dropout_eval,
+                )
+            )(jnp.stack([first_context, second_context], axis=0))
+            first_output_grids, second_output_grids = output_grids[0], output_grids[1]
+            first_output_shapes, second_output_shapes = output_shapes[0], output_shapes[1]
             return first_output_grids, first_output_shapes, second_output_grids, second_output_shapes, info
         else:
             output_grids, output_shapes = self._generate_output_from_context(
-                first_context, input_grid, input_grid_shape, dropout_eval
+                first_context, input, input_grid_shape, dropout_eval
             )
             return output_grids, output_shapes, info
 
     def _generate_output_from_context(
         self, context: chex.Array, input: chex.Array, input_grid_shape: chex.Array, dropout_eval: bool
-    ) -> tuple[chex.Array, chex.Array]:
+    ):
         flattened_input = jnp.reshape(input, (*input.shape[:-2], -1))
         input_seq = jnp.concatenate([input_grid_shape, flattened_input], axis=-1)
         output_seq = jnp.zeros_like(input_seq).at[..., :2].set(1)  # Initialize the grid shape tokens to 1.
@@ -340,7 +538,7 @@ class LPN(nn.Module):
         output_shapes = output_seq[..., :2]
         max_cols = self.decoder.config.max_cols
 
-        def one_step(decoder: DecoderTransformer, output_seq: chex.Array, i: int) -> tuple[chex.Array, None]:
+        def one_step(decoder: DecoderTransformer, output_seq: chex.Array, i: int):
             *_, grid_logits = decoder(input_seq, output_seq, context, dropout_eval)
             # If we are at the beginning of a new row, the index of the logits to predict the next token is
             # the index of the last non-padded token of the previous row.
@@ -365,221 +563,106 @@ class LPN(nn.Module):
 
         return output_grids, output_shapes
 
-    @staticmethod
-    def _flatten_input_output_for_decoding(
-        pairs: chex.Array, grid_shapes: chex.Array
-    ) -> tuple[chex.Array, chex.Array]:
-        flattened_pairs = jnp.reshape(pairs, (*pairs.shape[:-3], -1, 2))
-        input_seq = jnp.concatenate([grid_shapes[..., 0, :], flattened_pairs[..., 0]], axis=-1)
-        output_seq = jnp.concatenate([grid_shapes[..., 1, :], flattened_pairs[..., 1]], axis=-1)
-        return input_seq, output_seq
-
-    @classmethod
-    def _prepare_latents_before_search(
-        cls,
-        include_mean_latent: bool,
-        include_all_latents: bool,
+    def _get_random_search_context(
+        self,
         latents: chex.Array,
-        random_perturbation: Optional[dict] = None,
-        key: Optional[chex.PRNGKey] = None,
-    ) -> chex.Array:
-        """
-        Selects the latents from which to start the search. If include_mean_latent is True, the mean latent
-        is included in the latents from which to start the search. If include_all_latents is True, all the pair
-        latents are included in the latents from which to start the search. If both are True, the mean latent
-        is concatenated to the latents from which to start the search. If both are False, an error is raised.
+        pairs: chex.Array,
+        grid_shapes: chex.Array,
+        key: chex.PRNGKey,
+        num_samples: int,
+        scale: float,
+        scan_batch_size: Optional[int] = None,
+        include_mean_latent: bool = True,
+        include_all_latents: bool = False,
+        **kwargs,
+    ):
+        """Returns the best two contexts using a batched random search.
 
         Args:
-            include_mean_latent: if true, includes the mean latent in the latents from which to start the search.
-            include_all_latents: if true, includes all the pair latents in the latents from which to start the
-                search.
             latents: latents from the encoder. Shape (*B, N, H).
-            random_perturbation: dictionary of random perturbation arguments. If not None, the following
-                arguments are required:
-                - num_samples: number of random samples to generate around the mean latent.
-                - scale: Gaussian scale of the random perturbations.
-            key: random key to generate the random perturbation. Shape (2,).
+            pairs: input data as tokens. Shape (*B, N, R, C, 2).
+            grid_shapes: shapes of the grids (e.g. 30x30). Shape (*B, N, 2, 2). Expects grid shapes values
+                to be in [1, max_rows] and [1, max_cols].
+            key: random key to generate the random search. Shape (2,).
+            num_samples: number of random samples to generate.
+            scale: Gaussian scale of the random samples.
+            scan_batch_size: batch size for the scan function. If None, the batch size is the same as the
+                number of latents.
+            include_mean_latent: if true (default to true), includes the mean latent in the latents from which
+                to start the random search.
+            include_all_latents: if true (default to false), includes all the pair latents in the latents from
+                which to start the random search.
 
         Returns:
-            latents: latents from which to start the search. Shape (*B, 1, H), (*B, N, H), or (*B, N+1, H).
+            best_context: best context. Shape (*B, H).
+            second_best_context: second best context. Shape (*B, H).
         """
-        if include_mean_latent:
-            #mean_latent = latents
-            mean_latent = latents.mean(axis=-2, keepdims=True)
+        latents = self._prepare_latents_before_search(include_mean_latent, include_all_latents, latents)
 
-            if include_all_latents:
-                # Include the mean latent in the latents from which to start the search.
-                prep_latents = jnp.concatenate([mean_latent, latents], axis=-2)
-            else:
-                # Only start the search from the mean latent.
-                prep_latents = mean_latent
-        else:
-            # Start the search from all the pair latents.
-            if not include_all_latents:
-                raise ValueError(
-                    "At least one of 'include_mean_latent' or 'include_all_latents' should be True."
-                )
-            prep_latents = latents
-        if random_perturbation is not None:
-            assert key is not None, "'key' argument required for random perturbation."
-            for arg in ["num_samples", "scale"]:
-                assert arg in random_perturbation, f"'{arg}' argument required for random perturbation."
-            num_samples = random_perturbation["num_samples"]
-            scale = random_perturbation["scale"]
-            random_vectors = jax.random.normal(key, (*latents.shape[:-2], num_samples, latents.shape[-1]))
-            random_latents = latents.mean(axis=-2, keepdims=True) + scale * random_vectors
-            prep_latents = jnp.concatenate([prep_latents, random_latents], axis=-2)
-        return prep_latents
-
-    @staticmethod
-    def _select_best_and_second_best_latents(
-        log_probs: chex.Array, # Shape: (*batch_dims, K)
-        latents: chex.Array    # Shape: (*batch_dims, K, H)
-    ) -> tuple[chex.Array, chex.Array]:
-        k_dim_log_probs = log_probs.ndim - 1
-        k_dim_latents = latents.ndim - 2
-
-        assert log_probs.shape[:-1] == latents.shape[:-2], \
-            f"Batch dimensions mismatch: log_probs {log_probs.shape[:-1]}, latents {latents.shape[:-2]}"
-
-        sorted_indices = jnp.argsort(log_probs, axis=k_dim_log_probs, descending=True)
-        
-        best_k_index_slice = jax.lax.slice_in_dim(sorted_indices, start_index=0, limit_index=1, axis=k_dim_log_probs)
-        best_k_index_expanded = best_k_index_slice[..., None] 
-        
-        best_ctx = jnp.take_along_axis(latents, best_k_index_expanded, axis=k_dim_latents).squeeze(axis=k_dim_latents)
-        
-        second_best_ctx = best_ctx 
-        if sorted_indices.shape[k_dim_log_probs] > 1:
-            second_k_index_slice = jax.lax.slice_in_dim(sorted_indices, start_index=1, limit_index=2, axis=k_dim_log_probs)
-            second_k_index_expanded = second_k_index_slice[..., None]
-            second_best_ctx = jnp.take_along_axis(latents, second_k_index_expanded, axis=k_dim_latents).squeeze(axis=k_dim_latents)
-            
-        return best_ctx, second_best_ctx
-
-    def _compute_log_probs(
-        self, row_logits, col_logits, grid_logits, output_seq, grid_log_prob_weight: float = 1.0,
-        use_product_score: bool = False 
-    ) -> chex.Array: 
-        max_cols = self.decoder.config.max_cols
-        num_rows, num_cols = output_seq[..., 0].astype(jnp.int32), output_seq[..., 1].astype(jnp.int32)
-        
-        row_all_lp = jax.nn.log_softmax(row_logits, axis=-1)
-        row_lp = jnp.take_along_axis(row_all_lp, num_rows[..., None] - 1, axis=-1).squeeze(axis=-1)
-        
-        col_all_lp = jax.nn.log_softmax(col_logits, axis=-1)
-        col_lp = jnp.take_along_axis(col_all_lp, num_cols[..., None] - 1, axis=-1).squeeze(axis=-1)
-        
-        last_non_pad_lgts = self._get_last_non_padded_logits(grid_logits, num_cols[..., None, None])
-        if max_cols > 0 and grid_logits.shape[-2] >= max_cols and \
-           hasattr(last_non_pad_lgts, 'shape') and last_non_pad_lgts.shape[-2] > 0:
-            grid_logits = grid_logits.at[..., max_cols::max_cols, :].set(last_non_pad_lgts)
-
-        grid_all_lp = jax.nn.log_softmax(grid_logits, axis=-1)
-        grid_tok_lp = jnp.take_along_axis(grid_all_lp, output_seq[..., 2:, None].astype(jnp.int32), axis=-1).squeeze(axis=-1)
-        avg_grid_lp = self._normalized_mean_over_sequence(grid_tok_lp, num_rows, num_cols)
-
-        lp_per_pair = row_lp + col_lp + grid_log_prob_weight * avg_grid_lp
-        
-        n_p_axis = -1 
-        if lp_per_pair.ndim == 0: return lp_per_pair
-
-        if use_product_score: 
-	        total_lp = jnp.log(jnp.clip(jnp.exp(lp_per_pair).prod(axis=n_p_axis), a_min=1e-10))
-        else:
-    	    total_lp = jnp.sum(lp_per_pair, axis=n_p_axis) 
-        return total_lp
-
-    def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:
-        # VMAP version
-        max_rows_cfg, max_cols_cfg = self.decoder.config.max_rows, self.decoder.config.max_cols
-
-        if max_rows_cfg <= 1:
-            return jnp.zeros((*grid_logits.shape[:-2], 0, grid_logits.shape[-1]), dtype=grid_logits.dtype)
-
-        num_cols_int = num_cols.astype(jnp.int32) 
-        prev_row_indices_0_indexed = jnp.arange(0, max_rows_cfg - 1) 
-
-
-        def get_one_last_logit(prev_row_idx_scalar):
-            index_to_gather = prev_row_idx_scalar * max_cols_cfg + (num_cols_int - 1)
-            seq_len_of_grid_logits = grid_logits.shape[-2]
-            safe_index_to_gather = jnp.clip(index_to_gather, 0, seq_len_of_grid_logits - 1)
-            
-            seq_dim_axis = grid_logits.ndim - 2
-            one_logit_vector = jnp.take_along_axis(grid_logits, safe_index_to_gather, axis=seq_dim_axis)
-            return one_logit_vector
-
-        all_logit_vectors_vmapped = jax.vmap(get_one_last_logit, in_axes=0)(prev_row_indices_0_indexed)
-        # Shape: (L, *batch_dims_grid, 1, VocabSize)
-        
-        # Squeeze the singleton dimension (axis=-2 for the (1) dim from num_cols_int's original trailing singletons)
-        all_logit_vectors_squeezed = all_logit_vectors_vmapped.squeeze(axis=-2) 
-        # Shape: (L, *batch_dims_grid, VocabSize)
-        
-        num_grid_batch_dims = grid_logits.ndim - 2 # Number of dims like B, N before Seq, Vocab
-        
-        # Transpose to move L to be the sequence dimension for concatenation: (*batch_dims_grid, L, VocabSize)
-        current_axes_order = list(range(all_logit_vectors_squeezed.ndim))
-        
-        if num_grid_batch_dims == 0: 
-            perm = current_axes_order 
-        elif num_grid_batch_dims > 0 :
-            batch_dim_axes = current_axes_order[1 : num_grid_batch_dims+1] 
-            l_axis = [current_axes_order[0]] 
-            # Any remaining axes (e.g., Vocab)
-            remaining_axes = current_axes_order[num_grid_batch_dims+1:] 
-            perm = batch_dim_axes + l_axis + remaining_axes
-        else: 
-            perm = current_axes_order
-
-        gathered_logits_final_shape = jnp.transpose(all_logit_vectors_squeezed, axes=perm)
-        return gathered_logits_final_shape
-    
-    def _get_random_search_context(
-        self, latents_to_search_from, pairs_for_eval, grid_shapes_for_eval, key,
-        num_samples: int, scale: float, scan_batch_size: Optional[int] = None, 
-        include_mean_latent: bool = True, include_all_latents: bool = False, **kwargs
-    ) -> tuple[chex.Array, chex.Array]:
-
-        perturb_dict = {"num_samples": num_samples, "scale": scale} if num_samples > 0 else None
-        all_candidate_latents = LPN._prepare_latents_before_search(
-            include_mean_latent, include_all_latents, latents_to_search_from, 
-            random_perturbation=perturb_dict, key=key
-        )
-        
-        input_seq_eval, output_seq_eval = LPN._flatten_input_output_for_decoding(
-            pairs_for_eval, grid_shapes_for_eval
-        )
-
-        def log_probs_fn_search_local(candidate_k_latent, inp_seq_Neval, out_seq_Neval, decoder_instance):
-            num_N_eval = inp_seq_Neval.shape[-2] 
-            
-            axis_to_expand = candidate_k_latent.ndim -1 
-            cand_exp_local = jnp.expand_dims(candidate_k_latent, axis=axis_to_expand)
-            
-            tile_reps_local = [1]*cand_exp_local.ndim
-            tile_reps_local[axis_to_expand] = num_N_eval
-            latents_k_for_Neval = jnp.tile(cand_exp_local, tile_reps_local)
-
-            r_logits, c_logits, g_logits = decoder_instance(
-                inp_seq_Neval, out_seq_Neval, latents_k_for_Neval, dropout_eval=True
+        if num_samples > 0:
+            # Sample some random latents around the given latents.
+            num_latents = latents.shape[-2]
+            num_padded_samples = math.ceil(num_samples / num_latents) * num_latents
+            random_vectors = jax.random.normal(
+                key,
+                (*latents.shape[:-2], num_latents, num_padded_samples // num_latents, latents.shape[-1]),
             )
-            log_probs_val = self._compute_log_probs(r_logits, c_logits, g_logits, out_seq_Neval)
-            return jnp.sum(log_probs_val) 
-        
-        vmap_axis_for_K_dim = latents_to_search_from.ndim - 2 # K is before H
+            random_latents = latents[..., None, :] + scale * random_vectors
+            random_latents = random_latents.reshape(*random_latents.shape[:-3], -1, random_latents.shape[-1])[
+                ..., :num_samples, :
+            ]
+            latents = jnp.concatenate([latents, random_latents], axis=-2)
 
-        log_probs_all_K = jax.vmap(
-            log_probs_fn_search_local, 
-            in_axes=(vmap_axis_for_K_dim, None, None, None),
-            out_axes=vmap_axis_for_K_dim 
-        )(all_candidate_latents, input_seq_eval, output_seq_eval, self.decoder)
-        
-        best_ctx, second_best_ctx = LPN._select_best_and_second_best_latents(
-            log_probs_all_K, all_candidate_latents
+        # Flatten input/output for decoding likelihood
+        input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
+
+        # Use the same latent for all pairs of the same task.
+        latents = latents[..., None, :, :].repeat(output_seq.shape[-2], axis=-3)
+
+        # Decode the output sequence in batches.
+        batch_size = scan_batch_size or latents.shape[-2]
+        num_batches = latents.shape[-2] // batch_size
+        batched_latents = jnp.reshape(
+            latents[..., : num_batches * batch_size, :],
+            (*latents.shape[:-2], num_batches, batch_size, latents.shape[-1]),
         )
-        return best_ctx, second_best_ctx
+        dropout_eval = True  # no dropout during decoder inference
+        _, (row_logits, col_logits, grid_logits) = nn.scan(
+            lambda decoder, _, latents: (
+                None,
+                jax.vmap(decoder, in_axes=(None, None, -2, None), out_axes=-2)(
+                    input_seq, output_seq, latents, dropout_eval
+                ),
+            ),
+            variable_broadcast="params",
+            split_rngs={"params": False},
+            in_axes=-3,
+            out_axes=-3,
+        )(self.decoder, None, batched_latents)
+        row_logits, col_logits, grid_logits = jax.tree_util.tree_map(
+            lambda x: x.reshape(*x.shape[:-3], -1, x.shape[-1]), (row_logits, col_logits, grid_logits)
+        )
+        if num_batches * batch_size < latents.shape[-2]:
+            remaining_latents = latents[..., num_batches * batch_size :, :]
+            row_logits_remainder, col_logits_remainder, grid_logits_remainder = jax.vmap(
+                self.decoder, in_axes=(None, None, -2, None), out_axes=-2
+            )(input_seq, output_seq, remaining_latents, dropout_eval)
+            row_logits, col_logits, grid_logits = jax.tree_util.tree_map(
+                lambda x, y: jnp.concatenate([x, y], axis=-2),
+                (row_logits, col_logits, grid_logits),
+                (row_logits_remainder, col_logits_remainder, grid_logits_remainder),
+            )
+
+        # Compute the the output sequence log probabilities for the different latents.
+        log_probs = jax.vmap(self._compute_log_probs, in_axes=(-2, -2, -2, None), out_axes=-1)(
+            row_logits, col_logits, grid_logits, output_seq
+        )
+
+        # Remove the duplication of the latents over the pairs.
+        latents = latents[..., 0, :, :]
+        best_context, second_best_context = self._select_best_and_second_best_latents(log_probs, latents)
+
+        return best_context, second_best_context
 
     def _get_gradient_ascent_context(
         self,
@@ -600,7 +683,7 @@ class LPN(nn.Module):
         random_perturbation: Optional[dict] = None,
         stop_gradient_latent_move: bool = True,
         **kwargs,
-    ) -> tuple[chex.Array, chex.Array]:
+    ):
         """Returns the best two contexts using a gradient ascent algorithm.
 
         Args:
@@ -633,9 +716,15 @@ class LPN(nn.Module):
             best_context: best context. Shape (*B, H).
             second_best_context: second best context. Shape (*B, H).
         """
-        latents = self._prepare_latents_before_search(
-            include_mean_latent, include_all_latents, latents, random_perturbation, key
-        )
+        if include_mean_latent or include_all_latents or random_perturbation is not None:
+            latents = self._prepare_latents_before_search(
+                include_mean_latent, include_all_latents, latents, random_perturbation, key
+            )
+        else:
+            assert latents.ndim == 3 and latents.shape[-2] == 1, (
+                "When using a manually specified context_init, it must have shape (B, 1, H)."
+            )   
+
 
         # Flatten input/output for decoding likelihood
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
@@ -646,7 +735,8 @@ class LPN(nn.Module):
             # Use the same latent for all pairs of the same task.
             latents = latents[..., None, :].repeat(output_seq.shape[-2], axis=-2)
             row_logits, col_logits, grid_logits = decoder(input_seq, output_seq, latents, dropout_eval=True)
-            log_probs = self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq)
+            log_probs = self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq,
+	    use_product_score=kwargs.get("use_product_score", False))
             return log_probs
 
         value_and_grad_log_probs_fn = jax.vmap(
@@ -785,6 +875,327 @@ class LPN(nn.Module):
 
         return best_context, second_best_context
 
-# Main block
+    @classmethod
+    def _prepare_latents_before_search(
+        cls,
+        include_mean_latent: bool,
+        include_all_latents: bool,
+        latents: chex.Array,
+        random_perturbation: Optional[dict] = None,
+        key: Optional[chex.PRNGKey] = None,
+    ) -> chex.Array:
+        """
+        Selects the latents from which to start the search. If include_mean_latent is True, the mean latent
+        is included in the latents from which to start the search. If include_all_latents is True, all the pair
+        latents are included in the latents from which to start the search. If both are True, the mean latent
+        is concatenated to the latents from which to start the search. If both are False, an error is raised.
+
+        Args:
+            include_mean_latent: if true, includes the mean latent in the latents from which to start the search.
+            include_all_latents: if true, includes all the pair latents in the latents from which to start the
+                search.
+            latents: latents from the encoder. Shape (*B, N, H).
+            random_perturbation: dictionary of random perturbation arguments. If not None, the following
+                arguments are required:
+                - num_samples: number of random samples to generate around the mean latent.
+                - scale: Gaussian scale of the random perturbations.
+            key: random key to generate the random perturbation. Shape (2,).
+
+        Returns:
+            latents: latents from which to start the search. Shape (*B, 1, H), (*B, N, H), or (*B, N+1, H).
+        """
+        if include_mean_latent:
+            mean_latent = latents.mean(axis=-2, keepdims=True)
+            if include_all_latents:
+                # Include the mean latent in the latents from which to start the search.
+                prep_latents = jnp.concatenate([mean_latent, latents], axis=-2)
+            else:
+                # Only start the search from the mean latent.
+                prep_latents = mean_latent
+        else:
+            # Start the search from all the pair latents.
+            if not include_all_latents:
+                raise ValueError(
+                    "At least one of 'include_mean_latent' or 'include_all_latents' should be True."
+                )
+            prep_latents = latents
+        if random_perturbation is not None:
+            assert key is not None, "'key' argument required for random perturbation."
+            for arg in ["num_samples", "scale"]:
+                assert arg in random_perturbation, f"'{arg}' argument required for random perturbation."
+            num_samples = random_perturbation["num_samples"]
+            scale = random_perturbation["scale"]
+            random_vectors = jax.random.normal(key, (*latents.shape[:-2], num_samples, latents.shape[-1]))
+            random_latents = latents.mean(axis=-2, keepdims=True) + scale * random_vectors
+            prep_latents = jnp.concatenate([prep_latents, random_latents], axis=-2)
+        return prep_latents
+
+    @classmethod
+    def _flatten_input_output_for_decoding(
+        cls, pairs: chex.Array, grid_shapes: chex.Array
+    ):
+        flattened_pairs = jnp.reshape(pairs, (*pairs.shape[:-3], -1, 2))
+        input_seq = jnp.concatenate([grid_shapes[..., 0], flattened_pairs[..., 0]], axis=-1)
+        output_seq = jnp.concatenate([grid_shapes[..., 1], flattened_pairs[..., 1]], axis=-1)
+        return input_seq, output_seq
+
+    @classmethod
+    def _select_best_and_second_best_latents(
+        cls, log_probs: chex.Array, latents: chex.Array
+    ):
+        sorted_log_probs_indices = jnp.argsort(log_probs, axis=-1, descending=True)
+        best_context = jnp.take_along_axis(
+            latents, sorted_log_probs_indices[..., 0:1, None], axis=-2
+        ).squeeze(axis=-2)
+        try:
+            second_best_context = jnp.take_along_axis(
+                latents, sorted_log_probs_indices[..., 1:2, None], axis=-2
+            ).squeeze(axis=-2)
+        except ValueError:
+            # If there is only one latent, the second best context is the same as the best context.
+            second_best_context = best_context
+        return best_context, second_best_context
+
+    def _compute_log_probs(
+        self,
+        row_logits: chex.Array,
+        col_logits: chex.Array,
+        grid_logits: chex.Array,
+        output_seq: chex.Array,
+        grid_log_prob_weight: float = 1.0,
+        use_product_score: bool = False,
+    ) -> chex.Array:
+        """
+        Computes the log probabilities of the given output sequence given the row, column and grid logits.
+        Sums over the pairs and the sequence length.
+
+        Args:
+            row_logits: row logits. Shape (*B, N, R).
+            col_logits: column logits. Shape (*B, N, C).
+            grid_logits: grid logits. Shape (*B, N, R*C, V).
+            output_seq: output sequence. Shape (*B, N, R*C+2).
+            grid_log_prob_weight: weight for the grid log probabilities.
+
+        Returns:
+            log_probs: log probabilities of the output sequence. Shape (*B,).
+        """
+        max_cols = self.decoder.config.max_cols
+        num_rows, num_cols = output_seq[..., 0], output_seq[..., 1]
+        row_all_log_probs = jax.nn.log_softmax(row_logits)
+        row_log_probs = jnp.take_along_axis(row_all_log_probs, num_rows[..., None] - 1, axis=-1).squeeze(
+            axis=-1
+        )
+        col_all_log_probs = jax.nn.log_softmax(col_logits)
+        col_log_probs = jnp.take_along_axis(col_all_log_probs, num_cols[..., None] - 1, axis=-1).squeeze(
+            axis=-1
+        )
+        # Copy the grid logits from the last non-padded column of each row to the first column of the
+        # next row, skipping the padding tokens.
+        last_non_padded_logits = self._get_last_non_padded_logits(grid_logits, num_cols[..., None, None])
+        grid_logits = grid_logits.at[..., max_cols::max_cols, :].set(last_non_padded_logits)
+
+        grid_all_log_probs = jax.nn.log_softmax(grid_logits)
+        grid_log_probs = jnp.take_along_axis(grid_all_log_probs, output_seq[..., 2:, None], axis=-1).squeeze(
+            axis=-1
+        )
+        grid_log_probs = self._normalized_mean_over_sequence(grid_log_probs, num_rows, num_cols)
+
+        log_probs = row_log_probs + col_log_probs + grid_log_prob_weight * grid_log_probs
+       # log_probs = jnp.sum(log_probs, axis=-1)  # sum log_probs over the pairs
+        if use_product_score:
+	        log_probs = jnp.log(jnp.clip(jnp.exp(log_probs).prod(axis=-1), a_min=1e-10))
+        else:
+    	    log_probs = jnp.sum(log_probs, axis=-1)
+
+        return log_probs
+
+    def _get_last_non_padded_logits(self, grid_logits: chex.Array, num_cols: chex.Array) -> chex.Array:
+        """Selects the grid logits from the last non-padded column of each row."""
+        max_rows, max_cols = self.decoder.config.max_rows, self.decoder.config.max_cols
+        last_non_padded_logits = []
+        for i in range(1, max_rows):
+            end_of_row_logits = jnp.take_along_axis(
+                grid_logits, max_cols * i - (max_cols - num_cols.astype(jnp.int32)), axis=-2
+            )
+            last_non_padded_logits.append(end_of_row_logits)
+        return jnp.concatenate(last_non_padded_logits, axis=-2)
+
+
 if __name__ == "__main__":
-    from src.models.utils import TransformerLayerConfig 
+    from src.models.utils import TransformerLayerConfig
+
+    batch_size = 4
+    mini_batch_size = 3
+    max_rows = 5
+    max_cols = 5
+    vocab_size = 10
+
+    encoder_config = EncoderTransformerConfig(
+        vocab_size=vocab_size,
+        max_rows=max_rows,
+        max_cols=max_cols,
+        transformer_layer=TransformerLayerConfig(dropout_rate=0.05),
+        variational=True,
+    )
+    decoder_config = DecoderTransformerConfig(
+        vocab_size=vocab_size,
+        max_rows=max_rows,
+        max_cols=max_cols,
+        transformer_layer=TransformerLayerConfig(dropout_rate=0.05),
+    )
+
+    encoder = EncoderTransformer(encoder_config)
+    decoder = DecoderTransformer(decoder_config)
+    lpn = LPN(encoder=encoder, decoder=decoder)
+
+    key = jax.random.PRNGKey(0)
+    pairs = jax.random.randint(
+        key,
+        (batch_size, mini_batch_size, max_rows, max_cols, 2),
+        minval=0,
+        maxval=vocab_size,
+    )
+    grid_shapes = jax.random.randint(
+        key,
+        (batch_size, mini_batch_size, 2, 2),
+        minval=1,
+        maxval=min(max_rows, max_cols) + 1,
+    )
+    variables = lpn.init(
+        key, pairs, grid_shapes, dropout_eval=False, mode="mean", prior_kl_coeff=1e-4, pairwise_kl_coeff=1e-4
+    )
+    num_parameters = sum(p.size for p in jax.tree_util.tree_leaves(variables["params"]))
+    print(f"Number of parameters: {num_parameters:,}")
+
+    rngs = {"dropout": key}
+    loss, metrics = jax.jit(lpn.apply, static_argnames=["dropout_eval", "mode"])(
+        variables,
+        pairs,
+        grid_shapes,
+        dropout_eval=False,
+        mode="mean",
+        rngs=key,
+        prior_kl_coeff=1e-4,
+        pairwise_kl_coeff=1e-4,
+    )
+    print("Mean Loss:", loss)
+    loss, metrics = jax.jit(lpn.apply, static_argnames=["dropout_eval", "mode"])(
+        variables,
+        pairs,
+        grid_shapes,
+        dropout_eval=False,
+        mode="all",
+        rngs=key,
+        prior_kl_coeff=1e-4,
+        pairwise_kl_coeff=1e-4,
+    )
+    print("All Loss:", loss)
+    loss, metrics = jax.jit(lpn.apply, static_argnames=["dropout_eval", "mode", "num_samples", "scale"])(
+        variables,
+        pairs,
+        grid_shapes,
+        dropout_eval=False,
+        prior_kl_coeff=1e-4,
+        pairwise_kl_coeff=1e-4,
+        mode="random_search",
+        rngs=key,
+        num_samples=10,
+        scale=1.0,
+    )
+    print("Random Search Loss:", loss)
+    loss, metrics = jax.jit(
+        partial(
+            lpn.apply,
+            optimizer_kwargs={"b1": 0.5},
+            accumulate_gradients_decoder_pairs=True,
+            scan_gradients_latents=True,
+            include_all_latents=True,
+            random_perturbation={"num_samples": 3, "scale": 0.5},
+        ),
+        static_argnames=["dropout_eval", "mode", "num_steps", "lr", "optimizer"],
+    )(
+        variables,
+        pairs,
+        grid_shapes,
+        dropout_eval=False,
+        prior_kl_coeff=1e-4,
+        pairwise_kl_coeff=1e-4,
+        mode="gradient_ascent",
+        rngs=key,
+        num_steps=2,
+        lr=5e-2,
+        optimizer="adam",
+    )
+    print("Gradient Ascent Loss:", loss)
+
+    output_grids, output_shapes, _ = jax.jit(
+        lpn.apply,
+        static_argnames=[
+            "dropout_eval",
+            "mode",
+            "method",
+            "num_samples",
+            "scale",
+            "scan_batch_size",
+            "include_mean_latent",
+            "include_all_latents",
+        ],
+    )(
+        variables,
+        pairs,
+        grid_shapes,
+        pairs[:, 0, ..., 0],
+        grid_shapes[:, 0, ..., 0],
+        dropout_eval=False,
+        mode="random_search",
+        rngs=key,
+        method=lpn.generate_output,
+        num_samples=10,
+        scale=2.0,
+        scan_batch_size=None,
+        include_mean_latent=True,
+        include_all_latents=False,
+        key=key,
+    )
+    print("Random search")
+    print("Output grids of shape:", output_grids.shape)
+    print("Output shapes of shape:", output_shapes.shape)
+
+    output_grids, output_shapes, _ = jax.jit(
+        partial(
+            lpn.apply, optimizer_kwargs={"b1": 0.5}, random_perturbation={"num_samples": 3, "scale": 0.5}
+        ),
+        static_argnames=[
+            "dropout_eval",
+            "mode",
+            "method",
+            "num_steps",
+            "lr",
+            "optimizer",
+            "include_mean_latent",
+            "include_all_latents",
+            "stop_gradient_latent_move",
+            "remove_encoder_latents",
+        ],
+    )(
+        variables,
+        pairs,
+        grid_shapes,
+        pairs[:, 0, ..., 0],
+        grid_shapes[:, 0, ..., 0],
+        dropout_eval=False,
+        mode="gradient_ascent",
+        rngs=key,
+        method=lpn.generate_output,
+        num_steps=10,
+        lr=5e-3,
+        optimizer="adam",
+        include_mean_latent=True,
+        include_all_latents=False,
+        stop_gradient_latent_move=True,
+        remove_encoder_latents=True,
+        key=key,
+    )
+    print("Gradient ascent")
+    print("Output grids of shape:", output_grids.shape)
+    print("Output shapes of shape:", output_shapes.shape)
