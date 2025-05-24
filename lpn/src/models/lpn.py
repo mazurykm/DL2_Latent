@@ -81,47 +81,52 @@ class LPN(nn.Module):
             # Compute the loss for each pair using the mean of all but one latents. Shape (*B, N).
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
 
-        elif mode == "cross_attention_ga":
-            test_input = pairs[..., -1:, :, :, :]       # (B, 1, R, C, 2)
-            test_shape = grid_shapes[..., -1:, :, :]    # (B, 1, 2, 2)
-            support_latents = latents[..., :-1, :]      # (B, N-1, H)
+        elif mode == "cross_attention":
+            test_input = pairs[..., -1:, :, :, :] 
+            test_shape = grid_shapes[..., -1:, :, :] 
+            support_latents = latents[..., :-1, :] 
 
-            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)  # (B, H)
-            query = test_latent[..., None, :]           # (B, 1, H)
-            keys = support_latents                      # (B, N-1, H)
-            values = support_latents                    # (B, N-1, H)
-
+            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)  
+            query = test_latent[..., None, :]  
+            keys = support_latents 
+            values = support_latents
             attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
-            attn_weights = jax.nn.softmax(attn_logits, axis=-1)
-            context_init = jnp.matmul(attn_weights, values).squeeze(axis=-2)  # (B, H)
-            context_init = context_init[:, None, :]     # (B, 1, H)
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
+            context = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
 
+            context = jnp.tile(context[:, None, :], (1, pairs.shape[1], 1))  
+            loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
+        
+        elif mode == "cross_attention_ga":
             for arg in ["num_steps", "lr"]:
                 assert arg in mode_kwargs, f"'{arg}' argument required for 'cross_attention_ga' mode."
 
-            if mode_kwargs.get("random_perturbation", None) is not None:
-                key = self.make_rng("ga_cross_random_perturbation")
-            else:
-                key = self.make_rng("ga_cross")
+            # Step 1: Cross-attention to get initial context
+            test_input = pairs[..., -1:, :, :, :]
+            test_shape = grid_shapes[..., -1:, :, :]
+            support_latents = latents[..., :-1, :]
 
-            mode_kwargs = dict(mode_kwargs)
-            num_steps = mode_kwargs.pop("num_steps")
-            lr = mode_kwargs.pop("lr")
+            test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)
+            query = test_latent[..., None, :]
+            keys = support_latents
+            values = support_latents
 
+            attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)
+            init_context = jnp.matmul(attn_weights, values).squeeze(axis=-2)  # shape (B, H)
+
+            # Step 2: Perform gradient ascent from this initial context
+            init_context = init_context[:, None, :]  # shape (B, 1, H)
+
+            pairs_last = pairs[..., -1:, :, :, :]  # shape (B, 1, R, C, 2)
+            grid_shapes_last = grid_shapes[..., -1:, :, :]  # shape (B, 1, 2, 2)
+
+            key = self.make_rng("cross_attention_ga")
             context, _ = self._get_gradient_ascent_context(
-                context_init,
-                pairs,                    
-                grid_shapes,
-                key,
-                num_steps=num_steps,
-                lr=lr,
-                include_mean_latent=False,  
-                include_all_latents=False,
-                random_perturbation=None,
-                **mode_kwargs,
-            )
+                init_context, pairs_last, grid_shapes_last, key, **mode_kwargs
+            )  # shape (B, H)
 
-            context = jnp.tile(context, (1, pairs.shape[1], 1))
+            context = jnp.tile(context[:, None, :], (1, pairs.shape[1], 1))  # shape (B, N, H)
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
 
 
@@ -423,7 +428,6 @@ class LPN(nn.Module):
         if mode == "mean":
             context = latents.mean(axis=-2)
             first_context, second_context = context, context
-
         elif mode == "cross_attention":
             test_input = jnp.stack([input, input], axis=-1)  
             test_input = test_input[:, None] 
@@ -437,41 +441,28 @@ class LPN(nn.Module):
             attn_weights = jax.nn.softmax(attn_logits, axis=-1)  
             context = jnp.matmul(attn_weights, values).squeeze(axis=-2) 
             first_context, second_context = context, context
-
         elif mode == "cross_attention_ga":
-            assert key is not None, "'key' argument required for 'cross_attention_ga' mode."
             for arg in ["num_steps", "lr"]:
-                assert arg in mode_kwargs, f"'{arg}' argument required for 'cross_attention_ga' mode."
+                assert arg in mode_kwargs, f"'{arg}' argument required for 'cross_attention_ga' inference mode."
+            assert key is not None, "'key' argument required for 'cross_attention_ga' inference mode."
 
-            test_input = jnp.stack([input, input], axis=-1)[:, None]  
-            test_shape = jnp.tile(input_grid_shape[:, None, None, :], (1, 1, 2, 1)) 
+            test_input = jnp.stack([input, input], axis=-1) 
+            test_input = test_input[:, None]  
+            test_shape = jnp.tile(input_grid_shape[:, None, None, :], (1, 1, 2, 1))  
+
             test_latent = self.encoder(test_input, test_shape, dropout_eval)[0].squeeze(-2)  
-            query = test_latent[..., None, :]
-            keys = latents
-            values = latents
+            query = test_latent[..., None, :] 
+            keys = latents 
+            values = latents 
+
             attn_logits = jnp.einsum("bqh,bkh->bqk", query, keys) / math.sqrt(keys.shape[-1])
             attn_weights = jax.nn.softmax(attn_logits, axis=-1)
-            context_init = jnp.matmul(attn_weights, values).squeeze(axis=-2)[:, None, :] 
+            init_context = jnp.matmul(attn_weights, values).squeeze(axis=-2)  
 
-            mode_kwargs = dict(mode_kwargs)
-            num_steps = mode_kwargs.pop("num_steps")
-            lr = mode_kwargs.pop("lr")
-
-            context, _ = self._get_gradient_ascent_context(
-                context_init,
-                pairs,
-                grid_shapes,
-                key,
-                num_steps=num_steps,
-                lr=lr,
-                include_mean_latent=False,
-                include_all_latents=False,
-                random_perturbation=None,
-                **mode_kwargs,
+            init_context = init_context[:, None, :] 
+            first_context, second_context = self._get_gradient_ascent_context(
+                init_context, pairs, grid_shapes, key, **mode_kwargs
             )
-
-            first_context, second_context = context.squeeze(axis=1), context.squeeze(axis=1)
-
 
         elif mode == "first":
             context = latents[..., 0, :]
@@ -716,15 +707,9 @@ class LPN(nn.Module):
             best_context: best context. Shape (*B, H).
             second_best_context: second best context. Shape (*B, H).
         """
-        if include_mean_latent or include_all_latents or random_perturbation is not None:
-            latents = self._prepare_latents_before_search(
-                include_mean_latent, include_all_latents, latents, random_perturbation, key
-            )
-        else:
-            assert latents.ndim == 3 and latents.shape[-2] == 1, (
-                "When using a manually specified context_init, it must have shape (B, 1, H)."
-            )   
-
+        latents = self._prepare_latents_before_search(
+            include_mean_latent, include_all_latents, latents, random_perturbation, key
+        )
 
         # Flatten input/output for decoding likelihood
         input_seq, output_seq = self._flatten_input_output_for_decoding(pairs, grid_shapes)
@@ -905,7 +890,7 @@ class LPN(nn.Module):
             latents: latents from which to start the search. Shape (*B, 1, H), (*B, N, H), or (*B, N+1, H).
         """
         if include_mean_latent:
-            mean_latent = latents.mean(axis=-2, keepdims=True)
+            mean_latent = latents
             if include_all_latents:
                 # Include the mean latent in the latents from which to start the search.
                 prep_latents = jnp.concatenate([mean_latent, latents], axis=-2)
