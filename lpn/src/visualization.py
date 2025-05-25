@@ -87,72 +87,176 @@ def display_function_examples(grids, shapes, num_pairs=None, seed=None) -> tuple
     plt.show()
     return grids[b], shapes[b]  # Return the input grids and shapes for the batch
 
-
 def visualize_json_submission(
-    challenges: dict[str, list], generations: dict[str, list], solutions: dict[str, list], num_tasks: int = 5
+    challenges: dict[str, list],
+    generations: dict[str, list],
+    solutions: dict[str, list],
+    num_tasks: int = 5,
 ) -> plt.Figure:
     keys = list(generations.keys())[:num_tasks]
     num_tasks = len(keys)
+
     # Find the maximum number of (train + test) pairs throughout all tasks
     max_num_pairs = max(
         len(challenge["train"]) + len(challenge["test"])
         for task_id, challenge in challenges.items()
         if task_id in generations
     )
-    height_ratios = num_tasks * [1, 1, 1, 0.2]  # Input, True Output, Predicted Output, Line
+
+    # Determine maximum number of intermediate steps to allocate enough rows
+    max_intermediates = max(
+        max(len(gen.get("intermediate_attempts", {})) for gen in generations[task_id])
+        for task_id in keys
+    )
+
+    # Build height ratios
+    base_rows_per_task = 3  # Input, Output, Prediction
+    rows_per_task = base_rows_per_task + max_intermediates
+    height_ratios = [1] * (rows_per_task * num_tasks) + [0.2] * (num_tasks - 1)
+
     fig, axs = plt.subplots(
-        4 * num_tasks - 1,
+        rows_per_task * num_tasks + (num_tasks - 1),
         max_num_pairs,
-        figsize=(3 * max_num_pairs, 9.6 * num_tasks - 0.6),
-        height_ratios=height_ratios[:-1],
-        dpi=min(100, int(100 / (num_tasks / 60))),  # Limit the total number of pixels
+        figsize=(3 * max_num_pairs, 3 * rows_per_task * num_tasks),
+        height_ratios=height_ratios,
+        dpi=min(100, int(100 / (num_tasks / 60))),
     )
 
     for task_index, key in enumerate(keys):
-        challenge_list, solution_list, generation_list = challenges[key], solutions[key], generations[key]
+        challenge_list = challenges[key]
+        solution_list = solutions[key]
+        generation_list = generations[key]
+
         num_test_grids = len(challenge_list["test"])
+
         for test_index, (challenge, solution, generation) in enumerate(
             zip(challenge_list["test"], solution_list, generation_list)
         ):
+            row_offset = task_index * (rows_per_task + 1)
+
             input_grid = np.array(challenge["input"])
             output_grid = np.array(solution)
             prediction_grid = np.array(generation["attempt_1"])
 
-            display_grid(axs[4 * task_index, test_index], input_grid, (30, 30))
-            axs[4 * task_index, test_index].set_title("Input")
+            display_grid(axs[row_offset, test_index], input_grid, (30, 30))
+            axs[row_offset, test_index].set_title("Input")
 
-            display_grid(axs[4 * task_index + 1, test_index], output_grid, (30, 30))
-            axs[4 * task_index + 1, test_index].set_title("Output")
+            display_grid(axs[row_offset + 1, test_index], output_grid, (30, 30))
+            axs[row_offset + 1, test_index].set_title("Output")
 
-            display_grid(axs[4 * task_index + 2, test_index], prediction_grid, (30, 30))
-            axs[4 * task_index + 2, test_index].set_title("Prediction")
+            display_grid(axs[row_offset + 2, test_index], prediction_grid, (30, 30))
+            axs[row_offset + 2, test_index].set_title("Prediction")
 
-        for train_task_index, train_task in enumerate(challenge_list["train"]):
+            # Plot intermediate steps if available
+            intermediate = generation.get("intermediate_attempts", {})
+            for i, (step_name, step_grid) in enumerate(sorted(intermediate.items(), key=lambda x: int(x[0].split("_")[1]))):
+                row = row_offset + 3 + i
+                step_grid_np = np.squeeze(np.array(step_grid))
+                display_grid(axs[row, test_index], step_grid_np, (30, 30))
+                axs[row, test_index].set_title(f"Intermediate {step_name}")
+
+        # Train pairs
+        for train_index, train_task in enumerate(challenge_list["train"]):
+            row_offset = task_index * (rows_per_task + 1)
+
             input_grid = np.array(train_task["input"])
             output_grid = np.array(train_task["output"])
 
-            display_grid(axs[4 * task_index, num_test_grids + train_task_index], input_grid, (30, 30))
-            axs[4 * task_index, num_test_grids + train_task_index].set_title("Input")
+            col_index = num_test_grids + train_index
 
-            display_grid(axs[4 * task_index + 1, num_test_grids + train_task_index], output_grid, (30, 30))
-            axs[4 * task_index + 1, num_test_grids + train_task_index].set_title("Output")
+            display_grid(axs[row_offset, col_index], input_grid, (30, 30))
+            axs[row_offset, col_index].set_title("Input")
 
-            axs[4 * task_index + 2, num_test_grids + train_task_index].axis("off")
+            display_grid(axs[row_offset + 1, col_index], output_grid, (30, 30))
+            axs[row_offset + 1, col_index].set_title("Output")
 
+            axs[row_offset + 2, col_index].axis("off")  # no prediction for train
+
+            for i in range(max_intermediates):
+                axs[row_offset + 3 + i, col_index].axis("off")
+
+        # Hide extra unused columns
         for col in range(num_test_grids + len(challenge_list["train"]), max_num_pairs):
-            for row in range(4 * task_index, 4 * task_index + 3):
-                axs[row, col].axis("off")
+            for r in range(rows_per_task):
+                axs[task_index * (rows_per_task + 1) + r, col].axis("off")
 
-        # Draw a line to separate tasks
-        if task_index < len(keys) - 1:
-            for i in range(max_num_pairs):
-                axs[4 * task_index + 3, i].axis("off")
-                axs[4 * task_index + 3, i].axhline(0.5, color="black", linewidth=4)
+        # Separator line
+        if task_index < num_tasks - 1:
+            row_line = (task_index + 1) * (rows_per_task + 1) - 1
+            for col in range(max_num_pairs):
+                axs[row_line, col].axis("off")
+                axs[row_line, col].axhline(0.5, color="black", linewidth=4)
 
     plt.tight_layout()
-    plt.subplots_adjust(wspace=0.01, hspace=0.25)  # Increased hspace for shape labels
+    plt.subplots_adjust(wspace=0.01, hspace=0.25)
 
     return fig
+
+# def visualize_json_submission(
+#     challenges: dict[str, list], generations: dict[str, list], solutions: dict[str, list], num_tasks: int = 5
+# ) -> plt.Figure:
+#     keys = list(generations.keys())[:num_tasks]
+#     num_tasks = len(keys)
+#     # Find the maximum number of (train + test) pairs throughout all tasks
+#     max_num_pairs = max(
+#         len(challenge["train"]) + len(challenge["test"])
+#         for task_id, challenge in challenges.items()
+#         if task_id in generations
+#     )
+#     height_ratios = num_tasks * [1, 1, 1, 0.2]  # Input, True Output, Predicted Output, Line
+#     fig, axs = plt.subplots(
+#         4 * num_tasks - 1,
+#         max_num_pairs,
+#         figsize=(3 * max_num_pairs, 9.6 * num_tasks - 0.6),
+#         height_ratios=height_ratios[:-1],
+#         dpi=min(100, int(100 / (num_tasks / 60))),  # Limit the total number of pixels
+#     )
+
+#     for task_index, key in enumerate(keys):
+#         challenge_list, solution_list, generation_list = challenges[key], solutions[key], generations[key]
+#         num_test_grids = len(challenge_list["test"])
+#         for test_index, (challenge, solution, generation) in enumerate(
+#             zip(challenge_list["test"], solution_list, generation_list)
+#         ):
+#             input_grid = np.array(challenge["input"])
+#             output_grid = np.array(solution)
+#             prediction_grid = np.array(generation["attempt_1"])
+
+#             display_grid(axs[4 * task_index, test_index], input_grid, (30, 30))
+#             axs[4 * task_index, test_index].set_title("Input")
+
+#             display_grid(axs[4 * task_index + 1, test_index], output_grid, (30, 30))
+#             axs[4 * task_index + 1, test_index].set_title("Output")
+
+#             display_grid(axs[4 * task_index + 2, test_index], prediction_grid, (30, 30))
+#             axs[4 * task_index + 2, test_index].set_title("Prediction")
+
+#         for train_task_index, train_task in enumerate(challenge_list["train"]):
+#             input_grid = np.array(train_task["input"])
+#             output_grid = np.array(train_task["output"])
+
+#             display_grid(axs[4 * task_index, num_test_grids + train_task_index], input_grid, (30, 30))
+#             axs[4 * task_index, num_test_grids + train_task_index].set_title("Input")
+
+#             display_grid(axs[4 * task_index + 1, num_test_grids + train_task_index], output_grid, (30, 30))
+#             axs[4 * task_index + 1, num_test_grids + train_task_index].set_title("Output")
+
+#             axs[4 * task_index + 2, num_test_grids + train_task_index].axis("off")
+
+#         for col in range(num_test_grids + len(challenge_list["train"]), max_num_pairs):
+#             for row in range(4 * task_index, 4 * task_index + 3):
+#                 axs[row, col].axis("off")
+
+#         # Draw a line to separate tasks
+#         if task_index < len(keys) - 1:
+#             for i in range(max_num_pairs):
+#                 axs[4 * task_index + 3, i].axis("off")
+#                 axs[4 * task_index + 3, i].axhline(0.5, color="black", linewidth=4)
+
+#     plt.tight_layout()
+#     plt.subplots_adjust(wspace=0.01, hspace=0.25)  # Increased hspace for shape labels
+
+#     return fig
 
 
 def visualize_dataset_generation(

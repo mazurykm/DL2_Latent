@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from tqdm.auto import tqdm
 import numpy as np
 
-from src.models.lpn import LPN
+from src.models.recurrent_lpn import LPN
 from src.datasets.task_gen.re_arc_generators import ARC_TASK_NAMES
 
 
@@ -30,6 +30,8 @@ class Evaluator:
                 return_two_best=True,
                 **inference_mode_kwargs,
                 method=model.generate_output,
+                matrix_size_rows=self.model.decoder.config.matrix_size_rows,
+                matrix_size_cols=self.model.decoder.config.matrix_size_cols,
             ),
             axis_name="devices",
             devices=self.devices[:1],
@@ -93,7 +95,7 @@ class Evaluator:
                     (pairs[None], grid_shapes[None], input[None], input_grid_shape[None], sub_key),
                     self.devices[:1],
                 )
-                *outputs, _ = self.pmap_generate_output(
+                *outputs, _, intermediate_dict = self.pmap_generate_output(
                     {"params": single_device_params},
                     b_pairs,
                     b_grid_shapes,
@@ -101,17 +103,51 @@ class Evaluator:
                     b_input_grid_shape,
                     sub_key,
                 )
+                
                 # Remove batch dim and device dim
                 first_output_grid, first_output_grid_shape, second_output_grid, second_output_grid_shape = (
                     jax.tree_util.tree_map(lambda x: x[0, 0], outputs)
                 )
+                # The same for dict
+                intermediate_attempts = {}
+
+                if intermediate_dict is not None:
+                    # Step 1: Move the entire dict from device to host
+                    intermediate_dict_host = jax.device_get(intermediate_dict)
+
+                    # Step 2: Remove batch and device dims per step
+                    # This assumes shape: {t: {"input": (1, 1, ...), "shape": (1, 1, ...)}}
+                    def squeeze_dict_entry(entry):
+                        return {
+                            "input": entry["input"][0, 0],    # Remove batch/device
+                            "shape": entry["shape"][0, 0],    # Remove batch/device
+                        }
+
+                    intermediate_dict_host = {
+                        t: squeeze_dict_entry(step_dict) for t, step_dict in intermediate_dict_host.items()
+                    }
+
+                    # Step 3: Build list of intermediate cropped inputs
+                    for t, step_data in intermediate_dict_host.items():
+                        input_grid = step_data["input"][0] # had to remove one more
+                        grid_shape = step_data["shape"]
+
+                        # Crop input to predicted shape
+                        num_rows, num_cols = grid_shape[0]
+                        cropped = input_grid[:num_rows, :num_cols].tolist()
+
+                        intermediate_attempts[f"step_{t}"] = cropped
+
 
                 # Crop the output to the predicted shape
                 first_num_rows, first_num_cols = first_output_grid_shape
+
                 second_num_rows, second_num_cols = second_output_grid_shape
+
                 attempts = {
                     "attempt_1": first_output_grid[:first_num_rows, :first_num_cols].tolist(),
                     "attempt_2": second_output_grid[:second_num_rows, :second_num_cols].tolist(),
+                    "intermediate_attempts": intermediate_attempts
                 }
                 task_outputs.append(attempts)
             results[task_id] = task_outputs
