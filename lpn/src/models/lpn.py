@@ -30,7 +30,8 @@ class LPN(nn.Module):
         **mode_kwargs,
     ):
         """
-        Forward pass of the LPN model.
+        Forward pass of the LPN
+         model.
 
         Args:
             pairs: input data as tokens. Shape (*B, N, R, C, 2).
@@ -90,9 +91,14 @@ class LPN(nn.Module):
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
         elif mode == "matrix":
             # Reshape latents into matrices and use matrix multiplication
-            latent_dim = leave_one_out_latents.shape[-1]
-            matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
-            context = self._compute_matrix_context(leave_one_out_latents, matrix_size)
+            #latent_dim = leave_one_out_latents.shape[-1]
+            #matrix_size = jnp.sqrt(latent_dim).astype(jnp.int32)  # Use JAX's type conversion
+            #context = self._compute_matrix_context(leave_one_out_latents, matrix_size)
+            context = self._compute_cross_attention_context(
+                leave_one_out_latents, 
+                matrix_size_rows=matrix_size_rows, 
+                matrix_size_cols=matrix_size_cols
+            )
             # context should be (*B, N, H)
             # Compute loss and metrics
             loss, metrics = self._loss_from_pair_and_context(context, pairs, grid_shapes, dropout_eval)
@@ -1085,6 +1091,27 @@ class LPN(nn.Module):
         context = context.reshape(*context.shape[:-2], -1)
         return context
 
+        def _compute_cross_attention_context(self, latents: chex.Array, matrix_size_rows: int, matrix_size_cols: int) -> chex.Array:
+            """Cross-attend across N-1 latents for each pair separately."""
+            rint("\n[DEBUG] >>> _compute_cross_attention_context() called.")
+            print(f"[DEBUG] Latents shape BEFORE reshape: {latents.shape}")  
+
+            batch_size, num_pairs, num_others, latent_dim = latents.shape
+            assert latent_dim == matrix_size_rows * matrix_size_cols, f"latent_dim={latent_dim}, expected {matrix_size_rows}*{matrix_size_cols}"
+
+            query = latents.mean(axis=-2, keepdims=True)   # (B, N, 1, H)
+            key = latents                                   # (B, N, N-1, H)
+            value = latents                                 # (B, N, N-1, H)
+
+            attn_scores = jnp.einsum('bnqh,bnkh->bnqk', query, key) / jnp.sqrt(latent_dim)  # (B, N, 1, N-1)
+            attn_weights = jax.nn.softmax(attn_scores, axis=-1)                             # (B, N, 1, N-1)
+
+            attended = jnp.einsum('bnqk,bnkh->bnqh', attn_weights, value)                   # (B, N, 1, H)
+            attended = attended.squeeze(axis=2)                                             # (B, N, H)
+
+            print(f"[DEBUG] Attended context shape AFTER attention: {attended.shape}")
+
+            return attended
 
 if __name__ == "__main__":
     from src.models.utils import TransformerLayerConfig
