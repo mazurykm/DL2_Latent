@@ -223,12 +223,6 @@ class LPN(nn.Module):
         # latents is (1,4,3,64)
         batch_shape = latents.shape[:-1]
         latent_dim = latents.shape[-1]
-        #print(f"latent_dim: {latent_dim}")
-        #print(f"matrix_size_rows: {matrix_size_rows}")
-        #print(f"matrix_size_cols: {matrix_size_cols}")
-        #print(f"batch_shape: {batch_shape}")
-        # Convert matrix_size to a concrete value
-        # matrix_size_int = matrix_size.astype(jnp.int32)
         
         # make a (1,4,3,8,8)
         static_shape = (*batch_shape, matrix_size_rows, matrix_size_cols)
@@ -285,7 +279,6 @@ class LPN(nn.Module):
 
             # Get the context for the current column
             context_col = context_matrix[..., t]
-            print(f"_loss_from_pair_and_context: t: {t}")
             
             if t == 0:
        
@@ -309,7 +302,6 @@ class LPN(nn.Module):
                 # Change current input to the predicted grid to feed it in the next step
                 predicted_tokens = jnp.argmax(grid_logits, axis=-1)
                 current_input = jnp.concatenate([output_seq[..., 0:2], predicted_tokens], axis=-1)
-                print(f"loss_from_pair_and_context: grid_loss at step 0: {grid_loss}")
 
             else:
                 
@@ -329,7 +321,6 @@ class LPN(nn.Module):
                 # Change current input to the predicted grid to feed it in the next step
                 predicted_tokens = jnp.argmax(grid_logits, axis=-1)
                 current_input = jnp.concatenate([output_seq[..., 0:2], predicted_tokens], axis=-1)
-                print(f"loss_from_pair_and_context: grid_loss at step {t}: {grid_loss}")
                 
            
         # -1 to shift the tokens to [0, max_rows-1]
@@ -747,7 +738,6 @@ class LPN(nn.Module):
             for t in range(matrix_size_cols):
 
                 context_col = context_matrix[..., t]
-                print(f"log_prob_fn, col number: {t}")
 
                 if t == 0:
        
@@ -756,14 +746,12 @@ class LPN(nn.Module):
                     # Change current input to the predicted grid to feed it in the next step
                     predicted_tokens = jnp.argmax(grid_logits, axis=-1)
                     current_input = jnp.concatenate([output_seq[..., 0:2], predicted_tokens], axis=-1)
-                    print(f"log_prob_fn, first step, predicted tokens shape: {predicted_tokens.shape}")
                 else:
                     
                     _, _, grid_logits = decoder(current_input, output_seq, context_col, dropout_eval=True)
                     # Change current input to the predicted grid to feed it in the next step
                     predicted_tokens = jnp.argmax(grid_logits, axis=-1)
                     current_input = jnp.concatenate([output_seq[..., 0:2], predicted_tokens], axis=-1)
-                    print(f"log_prob_fn, other steps, predicted tokens shape: {predicted_tokens.shape}")
                 
                         
             log_probs = self._compute_log_probs(row_logits, col_logits, grid_logits, output_seq)

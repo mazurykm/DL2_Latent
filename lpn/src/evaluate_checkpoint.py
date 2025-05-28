@@ -221,8 +221,10 @@ from src.evaluator import Evaluator
 from src.models.transformer import EncoderTransformer, DecoderTransformer
 from src.recurrent_train import Trainer, load_datasets, instantiate_config_for_mpt
 from src.data_utils import make_leave_one_out, DATASETS_BASE_PATH
-import os
+
 from datetime import datetime
+import os
+import uuid
 
 
 def instantiate_model(cfg: omegaconf.DictConfig, mixed_precision: bool) -> LPN:
@@ -350,18 +352,24 @@ def evaluate_json(
         key=jax.random.PRNGKey(random_search_seed),
         only_n_tasks=only_n_tasks,  # 'None' to run on all tasks
         progress_bar=True,
-        num_tasks_to_show=0, #change this to produce a plot 
+        num_tasks_to_show=5, #change this to produce a plot 
     )
     metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
     metrics["fig"] = fig
 
+    #TODO: Remove this line when the figure is not needed anymore
     # Save plt.Figure to a hardcoded folder "intermediate_outputs" with a timestamp in the name
     output_dir = "intermediate_outputs"
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fig_path = os.path.join(output_dir, f"evaluation_plot_{timestamp}.png")
-    fig.savefig(fig_path)
-    print(f"Figure saved as {fig_path}")
+    unique_id = uuid.uuid4().hex[:8]  # Shorten UUID for readability
+    fig_path = os.path.join(output_dir, f"evaluation_plot_{timestamp}_{unique_id}.png")
+
+    if fig is not None:
+        fig.savefig(fig_path)
+        print(f"Figure saved as {fig_path}")
+
+    return metrics
 
     return metrics
 
@@ -749,7 +757,7 @@ if __name__ == "__main__":
         parser.error(
             "Must provide either the json challenges (-jc) and solutions (-js) files or the dataset folder (-d)."
         )
-    if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent", "matrix", "cross_attention"]:
+    if args.inference_mode not in ["mean", "first", "random_search", "gradient_ascent","recurrent_ga", "matrix", "cross_attention"]:
         parser.error(
             "Invalid inference mode. Choose from ['mean', 'first', 'random_search', 'gradient_ascent']."
         )
