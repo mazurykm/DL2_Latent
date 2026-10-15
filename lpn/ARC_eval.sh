@@ -14,7 +14,7 @@ module load Anaconda3/2023.07-2
 source /home/scur2570/lpn-env/bin/activate
  
 cd /home/scur2570/DL2_Latent/lpn
-export WANDB_API_KEY=REDACTED
+: "${WANDB_API_KEY:?Set WANDB_API_KEY before running this script}"
 export HF_TOKEN = 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
 export PYTHONPATH=${PYTHONPATH}:${PWD}
 
